@@ -1,0 +1,20 @@
+# Python
+venv310/
+venv/
+__pycache__/
+*.pyc
+
+# Outputs
+output/
+
+# FAISS / indexes
+*.faiss
+cv_index.faiss
+
+# Data / PDFs
+Resumes PDF/
+Data/
+
+# IDE
+.vscode/
+.idea/
