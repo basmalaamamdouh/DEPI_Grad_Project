@@ -2,499 +2,394 @@ import os
 import re
 import json
 import pdfplumber
+from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+import logging
+
+# =========================
+# LOGGING
+# =========================
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+logger = logging.getLogger("cv_pipeline")
 
 # =========================
 # CONFIG
 # =========================
-DATA_PATH   = r"data\pdf"
+DATA_PATH = r"data\pdf"
 OUTPUT_FILE = r"output\chunks.json"
-MAX_CHUNK_CHARS = 800   # soft ceiling per chunk
+MAX_CHUNK_CHARS = 500
+SENTENCE_OVERLAP = 1   # Number of sentences to carry over for context (avoids mid-word cuts)
 
-# ─────────────────────────────────────────────
-# SECTION PATTERNS  (matched on normalised line)
-# ─────────────────────────────────────────────
+# =========================
+# DATA STRUCTURES
+# =========================
 
-SECTION_PATTERNS: Dict[str, List[str]] = {
-    "education": [
-        r"^education$",
-        r"^academic background$",
-        r"^degrees?$",
-        r"^educational qualifications?$",
-        r"^academic qualifications?$",
-    ],
-    "experience": [
-        r"^(work\s+)?experience$",
-        r"^professional experience$",
-        r"^employment( history)?$",
-        r"^career( history)?$",
-        r"^work history$",
-    ],
-    "skills": [
-        r"^(technical\s+)?skills?$",
-        r"^core competencies$",
-        r"^technologies$",
-        r"^areas of expertise$",
-        r"^design platforms?",
-        r"^programming languages?$",
-    ],
-    "projects": [
-        r"^(funded\s+)?research projects?$",
-        r"^projects?$",
-        r"^personal projects?$",
-        r"^notable projects?$",
-    ],
-    "publications": [
-        r"^publications?$",
-        r"^journal\s+publications?$",
-        r"^conference\s+publications?$",
-        r"^research papers?$",
-        r"^research publications?",
-    ],
-    "achievements": [
-        r"^(academic\s+)?achievements?$",
-        r"^awards?(\s+and\s+honors?)?$",
-        r"^honors?$",
-        r"^certificates?$",
-        r"^certifications?$",
-        r"^awards and honors?$",
-    ],
-    "conferences": [
-        r"^conferences?(\s+and\s+workshops?)?$",
-        r"^conferences?\s+attended$",
-        r"^workshops?\s+attended$",
-    ],
-    "fields_of_interest": [
-        r"^fields\s+of\s+interest$",
-        r"^research interests?$",
-        r"^areas\s+of\s+interest$",
-    ],
-    "summary": [
-        r"^(professional\s+)?summary$",
-        r"^objective$",
-        r"^profile$",
-        r"^about(\s+me)?$",
-        r"^career objective$",
-    ],
-    "languages": [
-        r"^language proficiency$",
-        r"^spoken languages?$",
-        r"^human languages?$",
-    ],
-    "references": [
-        r"^references?$",
-        r"^referees?$",
-    ],
-    "contact": [
-        r"^contact(\s+information)?$",
-        r"^personal details?$",
-        r"^personal information$",
-    ],
-    "courses": [
-        r"^courses?$",
-        r"^certifications? and courses?$",
-        r"^online courses?$",
-        r"^courses taught$",
-    ],
-}
+@dataclass
+class ContactInfo:
+    email: str = ""
+    phone: str = ""
+    linkedin: str = ""
+    github: str = ""
 
-# ─────────────────────────────────────────────
-# STEP 1 — Multi-column-aware text extraction
-# ─────────────────────────────────────────────
+@dataclass
+class Chunk:
+    file_name: str
+    candidate_name: str
+    section: str
+    chunk_id: int           # Global unique ID across all files
+    local_chunk_id: int     # Index within the section (useful for ordering)
+    text: str
+    char_count: int
+    word_count: int
+    email: str = ""
+    phone: str = ""
+    linkedin: str = ""
+    github: str = ""
+    embedding_text: str = ""
 
-def _extract_page_lines_column_aware(page) -> List[str]:
-    """
-    For pages that look multi-column (common in CV PDFs), split
-    the page vertically at the midpoint and read each column as a
-    separate stream of lines, then interleave them top-to-bottom.
-    Falls back to plain left-to-right extraction for single-column pages.
-    """
-    words = page.extract_words(x_tolerance=3, y_tolerance=3)
-    if not words:
-        return []
+# =========================
+# SECTION PATTERNS
+# Ordered from most-specific to least-specific to avoid false matches.
+# Each pattern is anchored to the full line (after stripping punctuation).
+# =========================
 
-    page_width = page.width
+SECTION_PATTERNS = [
+    # (section_name, [regex patterns matched against the normalised line])
+    ("summary",     [r"^(summary|objective|about me|profile|professional profile|career summary)$"]),
+    ("education",   [r"^(education|academic background|qualifications|academic qualifications)$",
+                     r"^(university|faculty of|college of)",
+                     r"^academic$"]),
+    ("experience",  [r"^(experience|work experience|work history|employment|employment history)$",
+                     r"^(professional experience|career history|internship|internships)$"]),
+    ("skills",      [r"^(skills|technical skills|key skills|core skills|competencies)$",
+                     r"^(technologies|tools|technical proficiency|technical stack)$"]),
+    ("projects",    [r"^(projects|personal projects|academic projects|notable projects)$"]),
+    ("courses",     [r"^(courses|certifications|training|professional development)$",
+                     r"^(certificates|licenses|continuing education)$"]),
+    ("languages",   [r"^(languages|spoken languages|language proficiency)$"]),
+    ("publications",[r"^(publications|research|research publications|papers|journal articles)$"]),
+    ("awards",      [r"^(awards|honors|honours|achievements|recognitions|accomplishments)$"]),
+    ("volunteering",[r"^(volunteering|volunteer|community|extracurricular|activities)$"]),
+    ("references",  [r"^(references|referees)$"]),
+]
 
-    # Detect multi-column: are there clusters of words on both the
-    # left half and right half, with a gap in the middle?
-    left_words  = [w for w in words if w["x1"] < page_width * 0.52]
-    right_words = [w for w in words if w["x0"] > page_width * 0.48]
+# Lines that look like section headers but aren't — guard against false positives
+FALSE_POSITIVE_GUARDS = [
+    r"\d",         # Has a digit (likely a date or year)
+    r"@",          # Email address
+    r"http",       # URL
+    r"\|",         # Separator character common in experience entries
+]
 
-    gap_ratio = (len(left_words) + len(right_words)) / max(len(words), 1)
-    is_multicolumn = (
-        len(left_words) > 10
-        and len(right_words) > 10
-        and gap_ratio > 0.85   # most words are in one of the two halves
-    )
+# =========================
+# TEXT CLEANING
+# =========================
 
-    if not is_multicolumn:
-        text = page.extract_text()
-        return [l.strip() for l in (text or "").split("\n") if l.strip()]
+def normalize_text(text: str) -> str:
+    """Clean a single line: bullets → dashes, collapse whitespace, strip hyphen-breaks."""
+    text = re.sub(r"[•●▪◆►▶]", "-", text)
+    text = re.sub(r"[ \t]+", " ", text)          # Collapse horizontal whitespace only
+    text = re.sub(r"-\s+(?=[a-z])", "", text)    # Remove hyphenation breaks (only before lowercase)
+    return text.strip()
 
-    # Build lines from each column independently
-    def words_to_lines(word_list: list) -> List[str]:
-        if not word_list:
-            return []
-        # Sort by top (y0), then left (x0)
-        word_list = sorted(word_list, key=lambda w: (round(w["top"] / 5) * 5, w["x0"]))
-        lines: List[str] = []
-        current_top  = word_list[0]["top"]
-        current_line: List[str] = []
-        for w in word_list:
-            if abs(w["top"] - current_top) > 5:
-                if current_line:
-                    lines.append(" ".join(current_line))
-                current_line = [w["text"]]
-                current_top  = w["top"]
-            else:
-                current_line.append(w["text"])
-        if current_line:
-            lines.append(" ".join(current_line))
-        return lines
+def clean_extracted_text(raw: str) -> str:
+    """Post-process full extracted page text before splitting to lines."""
+    # Fix common PDF ligature issues
+    raw = raw.replace("ﬁ", "fi").replace("ﬂ", "fl").replace("ﬀ", "ff")
+    raw = raw.replace("ﬃ", "ffi").replace("ﬄ", "ffl")
+    # Remove control characters except newline
+    raw = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", raw)
+    return raw
 
-    # Assign each word exclusively to left or right column
-    midpoint = page_width / 2
-    left_only  = [w for w in words if w["x1"] <= midpoint]
-    right_only = [w for w in words if w["x0"] >= midpoint]
+# =========================
+# PDF EXTRACTION
+# =========================
 
-    left_lines  = words_to_lines(left_only)
-    right_lines = words_to_lines(right_only)
-
-    # Merge the two columns in reading order (left first, then right)
-    return left_lines + right_lines
-
-
-def extract_lines(file_path: str) -> List[Dict]:
-    """Return every non-empty line as {'text': str, 'page': int}."""
+def extract_lines(pdf_path: str) -> List[str]:
+    """Extract all non-empty, normalised lines from a PDF."""
     lines = []
     try:
-        with pdfplumber.open(file_path) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                for raw in _extract_page_lines_column_aware(page):
-                    text = raw.strip()
-                    if text:
-                        lines.append({"text": text, "page": page_num})
-    except Exception as exc:
-        print(f"  [ERROR] Could not read {file_path}: {exc}")
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                text = clean_extracted_text(text)
+                for line in text.split("\n"):
+                    line = normalize_text(line)
+                    if line and len(line) > 1:   # Skip single-character noise
+                        lines.append(line)
+    except Exception as e:
+        logger.error(f"Failed to read {pdf_path}: {e}")
     return lines
 
+# =========================
+# CONTACT EXTRACTION
+# =========================
 
-# ─────────────────────────────────────────────
-# STEP 2 — Header detection
-# ─────────────────────────────────────────────
-
-def _normalize(line: str) -> str:
-    """Strip numbering, trailing colon, collapse whitespace, lowercase."""
-    line = re.sub(r"^\s*(\d+|[IVXivxA-Za-z])[.)]\s*", "", line)
-    line = line.rstrip(":").strip()
-    line = re.sub(r"\s+", " ", line)
-    return line.lower()
-
-
-def detect_section_header(line: str) -> Optional[str]:
+def extract_contact(lines: List[str]) -> ContactInfo:
     """
-    Return the section key if line looks like a CV section header,
-    otherwise return None.
-
-    Header candidate rules:
-      - length after stripping <= 60 chars
-      - is ALL CAPS, Title Case, or ends with ':'
+    Extract contact fields from the first ~40 lines.
+    Uses targeted, unambiguous patterns to avoid false matches.
     """
-    stripped = line.strip()
-    if not stripped or len(stripped) > 60:
+    text = " ".join(lines[:40])
+
+    # Email — standard pattern
+    emails = re.findall(r"[\w.+\-]+@[\w\-]+\.[a-zA-Z]{2,}", text)
+
+    # Phone — international or local, must be 7+ digits, avoids matching years (4 digits)
+    # Matches: +92-333-1234567, (123) 456-7890, 01225796530, +123-456-7890
+    phones = re.findall(
+        r"(?<!\d)(?:\+?\d{1,3}[\s.\-]?)?(?:\(?\d{2,5}\)?[\s.\-]?)?\d{3,5}[\s.\-]?\d{4}(?!\d)",
+        text
+    )
+    # Filter out short matches that are just years
+    phones = [p.strip() for p in phones if len(re.sub(r"\D", "", p)) >= 7]
+
+    linkedin = re.findall(r"linkedin\.com/in/[\w\-]+", text, re.IGNORECASE)
+    github   = re.findall(r"github\.com/[\w\-]+", text, re.IGNORECASE)
+
+    return ContactInfo(
+        email    = emails[0]   if emails    else "",
+        phone    = phones[0]   if phones    else "",
+        linkedin = linkedin[0] if linkedin  else "",
+        github   = github[0]   if github    else "",
+    )
+
+# =========================
+# NAME EXTRACTION
+# =========================
+
+def extract_name(lines: List[str]) -> str:
+    """
+    Heuristic: the candidate name is usually one of the first few lines,
+    contains only alphabetic characters and spaces, and is 2–5 words long.
+    Handles both "First Last" and "FIRST LAST" formats.
+    """
+    for line in lines[:8]:
+        line = line.strip()
+        words = line.split()
+        if (
+            2 <= len(words) <= 5
+            and all(re.match(r"^[A-Za-z\-']+$", w) for w in words)
+            and not any(kw in line.lower() for kw in ["engineer", "developer", "manager",
+                                                        "analyst", "designer", "scientist",
+                                                        "student", "accountant", "chemist",
+                                                        "officer", "assistant", "specialist"])
+        ):
+            # Normalise ALL-CAPS names to Title Case
+            if line.isupper():
+                return line.title()
+            return line
+    return "Unknown"
+
+# =========================
+# SECTION DETECTION
+# =========================
+
+def detect_section(line: str) -> Optional[str]:
+    """
+    Determine if a line is a section header.
+    Returns the section name or None if it's regular content.
+    """
+    stripped = line.strip().rstrip(":").strip()
+
+    # Section headers are short
+    if len(stripped) > 60:
         return None
 
-    ends_with_colon = stripped.endswith(":")
-    # Ignore lines that are just a single letter or number
-    core = stripped.rstrip(":").strip()
-    if len(core) < 3:
-        return None
+    # Guard against false positives
+    for guard in FALSE_POSITIVE_GUARDS:
+        if re.search(guard, stripped):
+            return None
 
-    is_all_caps   = core.replace(" ", "").isupper() and len(core) > 2
-    is_title_case = core.istitle()
+    normalised = stripped.lower()
 
-    if not (ends_with_colon or is_all_caps or is_title_case):
-        return None
-
-    normalised = _normalize(stripped)
-
-    for section, patterns in SECTION_PATTERNS.items():
+    for section_name, patterns in SECTION_PATTERNS:
         for pattern in patterns:
-            if re.search(pattern, normalised, re.IGNORECASE):
-                return section
+            if re.search(pattern, normalised):
+                return section_name
 
     return None
 
-
-# ─────────────────────────────────────────────
-# STEP 3 — Split lines into labelled sections
-# ─────────────────────────────────────────────
-
-def split_into_sections(lines: List[Dict]) -> Dict[str, List[str]]:
+def split_sections(lines: List[str]) -> Dict[str, List[str]]:
     """
-    Walk lines; on a detected header switch to a new bucket.
-    Pre-header lines go into 'header'.
+    Walk through lines and assign each to a section.
+    Preserves insertion order (Python 3.7+ dicts).
     """
-    sections: Dict[str, List[str]] = {"header": []}
-    current_section = "header"
+    sections: Dict[str, List[str]] = defaultdict(list)
+    current = "header"
 
-    for line_info in lines:
-        line     = line_info["text"]
-        detected = detect_section_header(line)
-
-        if detected:
-            current_section = detected
-            if current_section not in sections:
-                sections[current_section] = []
-            sections[current_section].append(line)   # keep the header line
-        else:
-            if current_section not in sections:
-                sections[current_section] = []
-            sections[current_section].append(line)
-
-    return sections
-
-
-# ─────────────────────────────────────────────
-# STEP 4 — Post-process: reclassify ambiguous sections
-# ─────────────────────────────────────────────
-
-def _reclassify_languages_section(sections: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    """
-    'Languages' in CV PDFs sometimes means programming languages (→ skills)
-    and sometimes means spoken languages.  Classify by content:
-      - if the section mostly contains human-language names → keep as 'languages'
-      - if it mostly contains tech keywords → merge into 'skills'
-    """
-    if "languages" not in sections:
-        return sections
-
-    lang_lines = sections["languages"]
-    text = " ".join(lang_lines).lower()
-
-    # Tech keywords that indicate this is really a skills section
-    tech_keywords = [
-        "python", "java", "c++", "c#", "dart", "javascript", "flutter",
-        "pandas", "tensorflow", "pytorch", "sql", "html", "css", "php",
-        "ruby", "rust", "kotlin", "swift", "matlab", "r ", "scala",
-        "nodejs", "react", "angular", "vue",
-    ]
-    # Human language keywords
-    human_keywords = [
-        "arabic", "english", "french", "spanish", "german", "chinese",
-        "urdu", "portuguese", "italian", "native", "fluent", "proficient",
-        "beginner", "intermediate", "advanced", "mother tongue",
-    ]
-
-    tech_hits  = sum(1 for k in tech_keywords  if k in text)
-    human_hits = sum(1 for k in human_keywords if k in text)
-
-    if tech_hits > human_hits:
-        # Merge into skills
-        if "skills" not in sections:
-            sections["skills"] = []
-        sections["skills"].extend(lang_lines)
-        del sections["languages"]
-
-    return sections
-
-
-def post_process_sections(sections: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    sections = _reclassify_languages_section(sections)
-    return sections
-
-
-# ─────────────────────────────────────────────
-# STEP 5 — Clean & chunk each section
-# ─────────────────────────────────────────────
-
-def clean_lines(lines: List[str]) -> str:
-    cleaned = []
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        line = re.sub(r"[•●▪◆]", "-", line)   # normalise bullets
-        line = re.sub(r"\s{2,}", " ", line)     # collapse spaces
-        cleaned.append(line)
-    return "\n".join(cleaned)
-
-
-def _split_into_logical_items(text: str) -> List[str]:
-    """
-    Split section text into logical items for chunking:
-      1. Numbered list items (1. / [1] / (1))
-      2. Lettered headers (JOURNAL PAPERS:)
-      3. Paragraph breaks (double newline)
-      4. Bullet groups
-    """
-    # Try numbered items first
-    if re.search(r"\n[\[\(]?\d+[\]\).]", text):
-        parts = re.split(r"\n(?=[\[\(]?\d+[\]\).])", text)
-        if len(parts) > 1:
-            return parts
-
-    # Try double-newline paragraphs
-    parts = re.split(r"\n{2,}", text)
-    if len(parts) > 1:
-        return parts
-
-    return [text]
-
-
-def chunk_text(section_name: str, text: str,
-               max_chars: int = MAX_CHUNK_CHARS) -> List[str]:
-    """
-    Chunk a section text.  Publications and conferences get smaller chunks
-    (one entry per chunk ideally) for better retrieval precision.
-    """
-    if len(text) <= max_chars:
-        return [text]
-
-    items = _split_into_logical_items(text)
-    chunks: List[str] = []
-    current: List[str] = []
-    size = 0
-
-    for item in items:
-        item = item.strip()
-        if not item:
-            continue
-
-        # For publication/project sections, prefer one entry per chunk
-        # regardless of max_chars (unless a single entry exceeds it)
-        is_list_section = section_name in ("publications", "projects",
-                                           "conferences", "achievements")
-        force_split = is_list_section and size > 0 and len(item) > 100
-
-        if force_split or (size + len(item) > max_chars and current):
-            chunks.append("\n\n".join(current))
-            current, size = [item], len(item)
+        detected = detect_section(line)
+        if detected:
+            current = detected
         else:
-            current.append(item)
-            size += len(item)
+            sections[current].append(line)
 
-    if current:
-        chunks.append("\n\n".join(current))
+    return dict(sections)
+
+# =========================
+# SENTENCE-AWARE CHUNKING
+# =========================
+
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split text into sentence-like units.
+    Handles: periods, newlines, bullet dashes, and common abbreviations.
+    """
+    # Split on: period/exclamation/question followed by space+capital,
+    # OR on a dash-bullet at the start of a segment,
+    # OR on double+ spaces (common in PDF extraction).
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])|(?=\s-\s)|(?<=\n)", text)
+    sentences = []
+    for p in parts:
+        p = p.strip().lstrip("- ").strip()
+        if p:
+            sentences.append(p)
+    return sentences
+
+def chunk_section(text: str, max_size: int = MAX_CHUNK_CHARS,
+                  overlap_sentences: int = SENTENCE_OVERLAP) -> List[str]:
+    """
+    Split section text into overlapping chunks.
+    Overlap is sentence-based (not raw character slicing) to avoid mid-word cuts.
+
+    Strategy:
+      - Accumulate sentences until the chunk would exceed max_size.
+      - When flushing a chunk, carry over the last `overlap_sentences` sentences
+        as context for the next chunk.
+    """
+    sentences = split_into_sentences(text)
+    if not sentences:
+        return []
+
+    chunks: List[str] = []
+    current_sentences: List[str] = []
+    current_len = 0
+
+    for sentence in sentences:
+        sentence_len = len(sentence) + 1  # +1 for space
+
+        if current_len + sentence_len > max_size and current_sentences:
+            # Flush current chunk
+            chunks.append(" ".join(current_sentences).strip())
+            # Carry over the tail sentences for context
+            current_sentences = current_sentences[-overlap_sentences:] if overlap_sentences else []
+            current_len = sum(len(s) + 1 for s in current_sentences)
+
+        current_sentences.append(sentence)
+        current_len += sentence_len
+
+    # Flush the final chunk
+    if current_sentences:
+        chunks.append(" ".join(current_sentences).strip())
 
     return chunks
 
+# =========================
+# EMBEDDING TEXT GENERATION
+# =========================
 
-# ─────────────────────────────────────────────
-# STEP 6 — Process a single PDF
-# ─────────────────────────────────────────────
+def build_embedding_text(candidate_name: str, section: str, text: str) -> str:
+    """
+    Format the text for embedding in a way that gives the model rich context.
+    Including the candidate name helps retrieval when searching across many CVs.
+    """
+    return f"Candidate: {candidate_name}\nSection: {section}\nContent: {text}"
 
-def process_pdf(file_path: str) -> List[Dict]:
-    filename = os.path.basename(file_path)
-    print(f"Processing: {filename}")
+# =========================
+# PIPELINE
+# =========================
 
-    lines = extract_lines(file_path)
-    if not lines:
-        print("  [WARN] No text extracted — is the PDF image-based?")
-        return []
+class CVPipeline:
 
-    sections = split_into_sections(lines)
-    sections = post_process_sections(sections)
+    def process_pdf(self, path: str, global_id_start: int = 0) -> List[Chunk]:
+        filename = os.path.basename(path)
+        lines = extract_lines(path)
+        if not lines:
+            logger.warning(f"No text extracted from {filename}")
+            return []
 
-    all_chunks: List[Dict] = []
-    for section_name, section_lines in sections.items():
-        text = clean_lines(section_lines)
-        if not text or len(text) < 20:
-            continue
+        name    = extract_name(lines)
+        contact = extract_contact(lines)
+        sections = split_sections(lines)
 
-        sub_chunks = chunk_text(section_name, text)
-        for idx, chunk in enumerate(sub_chunks):
-            all_chunks.append({
-                "file_name":  filename,
-                "section":    section_name,
-                "chunk_id":   idx,
-                "text":       chunk,
-                "char_count": len(chunk),
-            })
+        logger.info(f"  Candidate: {name} | Sections found: {list(sections.keys())}")
 
-    detected = sorted({c["section"] for c in all_chunks})
-    print(f"  Sections  : {', '.join(detected)}")
-    print(f"  Chunks    : {len(all_chunks)}")
+        processed_chunks: List[Chunk] = []
+        global_chunk_id = global_id_start
 
-    # Warn about suspiciously large chunks
-    large = [c for c in all_chunks if c["char_count"] > 2000]
-    if large:
-        print(f"  [WARN] {len(large)} chunk(s) exceed 2000 chars "
-              f"(likely multi-column scrambling or very long section)")
-        for c in large[:3]:
-            print(f"    - section={c['section']}  chars={c['char_count']}")
+        for section_name, content_lines in sections.items():
+            # Join lines with a space, preserving natural sentence flow
+            full_section_text = " ".join(content_lines)
+            full_section_text = re.sub(r"\s+", " ", full_section_text).strip()
 
-    return all_chunks
+            # Skip noise — very short sections are usually stray text
+            if len(full_section_text) < 20:
+                continue
 
+            section_parts = chunk_section(full_section_text)
 
-# ─────────────────────────────────────────────
-# STEP 7 — Process all PDFs
-# ─────────────────────────────────────────────
+            for local_id, part in enumerate(section_parts):
+                part = part.strip()
+                if not part:
+                    continue
 
-def process_all_pdfs() -> List[Dict]:
-    if not os.path.exists(DATA_PATH):
-        print(f"[ERROR] Folder not found: {DATA_PATH}")
-        return []
+                processed_chunks.append(Chunk(
+                    file_name      = filename,
+                    candidate_name = name,
+                    section        = section_name,
+                    chunk_id       = global_chunk_id,
+                    local_chunk_id = local_id,
+                    text           = part,
+                    char_count     = len(part),
+                    word_count     = len(part.split()),
+                    email          = contact.email,
+                    phone          = contact.phone,
+                    linkedin       = contact.linkedin,
+                    github         = contact.github,
+                    embedding_text = build_embedding_text(name, section_name, part),
+                ))
+                global_chunk_id += 1
 
-    pdf_files = [f for f in os.listdir(DATA_PATH) if f.lower().endswith(".pdf")]
-    if not pdf_files:
-        print(f"[ERROR] No PDF files in {DATA_PATH}")
-        return []
+        return processed_chunks
 
-    print(f"Found {len(pdf_files)} PDF(s)\n")
-    all_chunks: List[Dict] = []
-    for pdf_file in pdf_files:
-        chunks = process_pdf(os.path.join(DATA_PATH, pdf_file))
-        all_chunks.extend(chunks)
-        print()
+    def run(self):
+        if not os.path.exists(DATA_PATH):
+            logger.error(f"Data path not found: {DATA_PATH}")
+            return
 
-    return all_chunks
+        pdf_files = sorted(f for f in os.listdir(DATA_PATH) if f.lower().endswith(".pdf"))
+        if not pdf_files:
+            logger.error("No PDF files found.")
+            return
 
+        all_chunks: List[Chunk] = []
+        global_id = 0
 
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
+        for filename in pdf_files:
+            logger.info(f"Processing: {filename}")
+            path = os.path.join(DATA_PATH, filename)
+            file_chunks = self.process_pdf(path, global_id_start=global_id)
+            all_chunks.extend(file_chunks)
+            global_id += len(file_chunks)
+
+        os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump([asdict(c) for c in all_chunks], f, indent=2, ensure_ascii=False)
+
+        # Summary statistics
+        from collections import Counter
+        section_counts = Counter(c.section for c in all_chunks)
+        candidate_counts = Counter(c.candidate_name for c in all_chunks)
+
+        logger.info(f"\n{'='*50}")
+        logger.info(f"Saved {len(all_chunks)} chunks to {OUTPUT_FILE}")
+        logger.info(f"Candidates processed: {len(candidate_counts)}")
+        logger.info(f"Sections distribution: {dict(section_counts.most_common())}")
+        logger.info(f"{'='*50}")
+
 
 if __name__ == "__main__":
-    chunks = process_all_pdfs()
-
-    if not chunks:
-        print("\nNo chunks generated.  Things to check:")
-        print("  1. Are the PDFs text-based (not scanned images)?")
-        print("  2. Do section headers appear in ALL CAPS or Title Case?")
-        print("  3. Add custom patterns to SECTION_PATTERNS if needed.")
-        raise SystemExit(1)
-
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(chunks, f, indent=2, ensure_ascii=False)
-    print(f"\n✓ Saved {len(chunks)} chunks → {OUTPUT_FILE}")
-
-    # ── Summary ──
-    from collections import Counter
-    counts = Counter(c["section"] for c in chunks)
-    print("\nChunks per section:")
-    for section, n in sorted(counts.items()):
-        print(f"  {section:<30} {n:>3} chunk(s)")
-
-    # ── Size distribution ──
-    sizes = [c["char_count"] for c in chunks]
-    print(f"\nChunk size stats:")
-    print(f"  min={min(sizes)}  max={max(sizes)}  "
-          f"avg={sum(sizes)//len(sizes)}  total_chunks={len(chunks)}")
-
-    over_limit = sum(1 for s in sizes if s > MAX_CHUNK_CHARS)
-    print(f"  Chunks over {MAX_CHUNK_CHARS} chars: {over_limit} "
-          f"({100*over_limit//len(sizes)}%) — often unavoidable for "
-          f"single-entry publications that are themselves long")
-
-    # ── Previews ──
-    print("\n── Sample chunks ──")
-    seen: set = set()
-    for chunk in chunks:
-        if chunk["section"] not in seen:
-            preview = chunk["text"][:200].replace("\n", " | ")
-            print(f"\n[{chunk['section'].upper()}]\n{preview}…")
-            seen.add(chunk["section"])
-        if len(seen) >= 6:
-            break
+    pipeline = CVPipeline()
+    pipeline.run()
