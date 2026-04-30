@@ -229,7 +229,6 @@ def print_results(results):
 # ══════════════════════════════════════════════════════════════
 # PROCESSING
 # ══════════════════════════════════════════════════════════════
-
 def process_file(file_path):
     print(f"\nProcessing: {file_path}")
 
@@ -245,7 +244,36 @@ def process_file(file_path):
     return embed_chunks(chunks, Path(file_path).name)
 
 
+
 def process_dataset(folder_path):
+   
+    all_data = load() if Path(EMBEDDINGS_FILE).exists() else []
+    
+    
+    processed_files = {d['file'] for d in all_data}
+    
+    files = list(Path(folder_path).rglob("*.pdf"))
+    print(f"\nFound {len(files)} PDF files. Already processed: {len(processed_files)}")
+
+    for i, file in enumerate(files):
+        
+        if file.name in processed_files:
+            continue
+
+        try:
+            data = process_file(str(file))
+            all_data.extend(data)
+            print(f"  [{i+1}/{len(files)}] DONE")
+            
+            if (i + 1) % 10 == 0:
+                save(all_data)
+                print(f"  >> Auto-saved at {i+1} files.")
+                
+        except Exception as e:
+            print(f"  SKIP {file.name}: {e}")
+
+    return all_data
+"""def process_dataset(folder_path):
     all_data = []
 
     files = list(Path(folder_path).rglob("*.pdf"))
@@ -256,10 +284,16 @@ def process_dataset(folder_path):
             data = process_file(str(file))
             all_data.extend(data)
             print(f"  [{i+1}/{len(files)}] DONE")
+            
+            
+            if (i + 1) % 10 == 0:
+                save(all_data)
+                print(f"  >> Auto-saved at {i+1} files.")
+
         except Exception as e:
             print(f"  SKIP {file.name}: {e}")
 
-    return all_data
+    return all_data"""
 
 
 # ══════════════════════════════════════════════════════════════
