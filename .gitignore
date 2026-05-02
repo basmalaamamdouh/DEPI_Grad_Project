@@ -1,0 +1,10 @@
+venv/
+venv310/
+__pycache__/
+*.pyc
+*.pkl
+*.faiss
+chroma_db/
+Data/
+output/
+.env
