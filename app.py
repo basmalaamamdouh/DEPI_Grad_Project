@@ -14,8 +14,9 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import gradio as gr
 from pipeline import (
     process_file, process_dataset,
-    rebuild_bm25, count_chunks, processed_files, search,
+    rebuild_bm25, count_chunks, processed_files,
 )
+from query_rewriter import smart_search, MIN_FIT_DEFAULT
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EMAIL CONFIG
@@ -224,10 +225,10 @@ def _candidate_card(rank: int, r: dict) -> str:
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SEARCH CALLBACK
+# SEARCH CALLBACK  (now uses smart_search with Groq query rewriting)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def cb_search(query: str, section: str, top_k: int, use_reranker: bool):
+def cb_search(query: str, section: str, top_k: int, use_reranker: bool, min_fit_pct: int):
     global _last_results
     query = query.strip()
     if not query:
@@ -237,26 +238,51 @@ def cb_search(query: str, section: str, top_k: int, use_reranker: bool):
             "",
         )
 
-    sec     = section if section != "Any" else None
-    results = search(query, top_k=int(top_k), section_filter=sec,
-                     use_reranker=use_reranker)
+    sec = section if section != "Any" else None
+    results, rq = smart_search(
+        query,
+        top_k=int(top_k),
+        section_filter=sec,
+        use_reranker=use_reranker,
+        min_fit_pct=int(min_fit_pct),
+    )
     _last_results = results
+
+    # Show what Groq actually searched (only visible when rewrite ran)
+    rewrite_note = ""
+    if rq.rewritten:
+        pills = "".join(
+            f"<span style='background:#f1f5f9;color:#475569;padding:2px 8px;"
+            f"border-radius:10px;font-size:11px;margin-right:4px'>{s}</span>"
+            for s in rq.must_have_skills
+        )
+        rewrite_note = (
+            f"<div style='font-size:12px;color:#64748b;margin-bottom:12px;"
+            f"padding:8px 12px;background:#f8fafc;border-radius:8px'>"
+            f"<b>Searched:</b> {rq.primary}"
+            + (f"<br><b>Must-have skills:</b> {pills}" if pills else "")
+            + (f"<br><b>Min experience:</b> {rq.min_years_exp} years" if rq.min_years_exp else "")
+            + "</div>"
+        )
 
     if not results:
         return (
+            rewrite_note +
             "<div style='text-align:center;padding:40px;color:#94a3b8;font-family:sans-serif'>"
-            "No candidates found for this query.</div>",
+            f"No candidates found above {int(min_fit_pct)}% fit.</div>",
             "",
         )
 
-    cards  = "".join(_candidate_card(i + 1, r) for i, r in enumerate(results))
+    cards   = "".join(_candidate_card(i + 1, r) for i, r in enumerate(results))
     top_fit = results[0].get("fit_pct", 0)
-    status = (
+    status  = (
         f"<span style='color:#166534;font-weight:500'>"
         f"Found <strong>{len(results)}</strong> candidate(s) for "
-        f"<em>\"{query}\"</em> — top fit: <strong>{top_fit}%</strong></span>"
+        f"<em>\"{query}\"</em> — top fit: <strong>{top_fit}%</strong>"
+        + (" · <em>query expanded by Groq</em>" if rq.rewritten else "")
+        + "</span>"
     )
-    return cards, status
+    return rewrite_note + cards, status
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EMAIL CALLBACKS
@@ -362,6 +388,10 @@ with gr.Blocks(title="HR Assistant — CV RAG", css=CSS) as demo:
                     label="Top K results", minimum=1, maximum=20, value=5, step=1, scale=1,
                 )
                 rerank_cb  = gr.Checkbox(label="Reranker", value=True, scale=1)
+                min_fit_sl = gr.Slider(
+                    label="Min fit %", minimum=0, maximum=80,
+                    value=MIN_FIT_DEFAULT, step=5, scale=1,
+                )
 
             search_btn    = gr.Button("Search", variant="primary", size="lg")
             search_status = gr.HTML("")
@@ -373,12 +403,12 @@ with gr.Blocks(title="HR Assistant — CV RAG", css=CSS) as demo:
 
             search_btn.click(
                 cb_search,
-                inputs=[query_box, section_dd, top_k_sl, rerank_cb],
+                inputs=[query_box, section_dd, top_k_sl, rerank_cb, min_fit_sl],
                 outputs=[results_html, search_status],
             )
             query_box.submit(
                 cb_search,
-                inputs=[query_box, section_dd, top_k_sl, rerank_cb],
+                inputs=[query_box, section_dd, top_k_sl, rerank_cb, min_fit_sl],
                 outputs=[results_html, search_status],
             )
 
@@ -458,14 +488,20 @@ with gr.Blocks(title="HR Assistant — CV RAG", css=CSS) as demo:
 
 ### 1 — Install dependencies
 ```bash
-pip install gradio sentence-transformers chromadb rank-bm25 pymupdf pillow
+pip install gradio sentence-transformers chromadb rank-bm25 pymupdf pillow groq
 ```
 
-### 2 — Configure Tesseract (only needed for scanned PDFs)
+### 2 — Set your Groq API key (free at https://console.groq.com)
+```bash
+set GROQ_API_KEY=gsk_...        # Windows
+export GROQ_API_KEY=gsk_...     # Mac / Linux
+```
+
+### 3 — Configure Tesseract (only needed for scanned PDFs)
 Download from: https://github.com/UB-Mannheim/tesseract/wiki  
 Then set `TESSERACT_CMD` in `pipeline.py` to your install path.
 
-### 3 — Index your dataset (run once, resumes on interrupt)
+### 4 — Index your dataset (run once, resumes on interrupt)
 ```bash
 # From a local folder
 python pipeline.py --dataset "D:/path/to/CVs"
@@ -481,13 +517,13 @@ python pipeline.py --dataset "D:/path/to/CVs" --rebuild
 ```
 Already-indexed files are tracked in `indexed_files.txt` and skipped automatically.
 
-### 4 — Start the web app
+### 5 — Start the web app
 ```bash
 python app.py
 # Open: http://localhost:7860
 ```
 
-### 5 — Email setup (Gmail)
+### 6 — Email setup (Gmail)
 1. Enable 2-step verification on your Google account  
 2. Go to Google Account → Security → App Passwords → create one  
 3. Set before running:
@@ -498,6 +534,15 @@ python app.py
 ```
 
 ---
+
+### How smart search works
+Every query is first sent to **Groq (free)** which expands it:
+- Abbreviations expanded: ML → machine learning, k8s → Kubernetes
+- Synonyms added: React → React.js / ReactJS
+- Must-have skills extracted and used as hard filters
+- Min years of experience parsed and enforced
+
+Then 2–3 query variants run through the full hybrid pipeline (BM25 + ChromaDB → RRF → reranker).
 
 ### How fit percentage works
 Each candidate gets a **0–100% fit score** calculated from:
