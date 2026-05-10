@@ -1,346 +1,664 @@
 """
-DEPI GenAI CV Processor
-Pipeline: Kaggle Dataset → OCR → Chunking → Embeddings → Search
+HR RAG Pipeline
+PDF → smart text extraction → chunking → embeddings → ChromaDB + BM25 → hybrid search
+
+Key improvements:
+- OCR only runs when native text extraction actually fails (< 30 chars)
+- Fast file skip-list stored in indexed_files.txt (no ChromaDB query needed)
+- Singleton CrossEncoder reranker (loaded once, reused across searches)
+- Fit percentage score exposed on every result (0-100%)
+- BM25 rebuilt incrementally every 20 new files, not every file
 """
 
-import re
-import json
-import numpy as np
+import os, re, sys, uuid, pickle, subprocess, tempfile, math
 from pathlib import Path
-from dataclasses import dataclass
-import sys
+from dataclasses import dataclass, field
 
-# ⚠️ SET THIS PATH (VERY IMPORTANT)
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# ── CPU-only safety ────────────────────────────────────────────────────────────
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIG  — edit these to match your machine
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ══════════════════════════════════════════════════════════════
-# STEP 0 — KAGGLE DATASET
-# ══════════════════════════════════════════════════════════════
+CHROMA_DIR      = "./chroma_db"
+BM25_FILE       = "./bm25_index.pkl"
+INDEXED_FILE    = "./indexed_files.txt"   # fast skip-list (one filename per line)
+UPLOAD_DIR      = "./uploads"
+COLLECTION      = "cvs"
+EMBED_MODEL     = "BAAI/bge-small-en-v1.5"
+TESSERACT_CMD   = r"D:\tessert\tesseract.exe"   # ← adjust to your install path
+OCR_TIMEOUT     = 20       # seconds per page
+OCR_DPI         = 200
+MIN_CHUNK_CHARS = 60
+N_DENSE_FETCH   = 500      # chunks pulled from ChromaDB before RRF
+BM25_REBUILD_EVERY = 20    # rebuild BM25 every N new files (not every file)
 
-def load_kaggle_dataset():
-    import kagglehub
-    dataset_path = kagglehub.dataset_download("hadikp/resume-data-pdf")
-    print("Dataset downloaded at:", dataset_path)
+# ── Fit-score calibration ──────────────────────────────────────────────────────
+# Raw rerank scores from ms-marco-MiniLM are in roughly (-10, +10).
+# We map them to 0-100% with a sigmoid so the UI always shows a meaningful number.
+SCORE_SCALE     = 0.35     # sigmoid steepness — increase to spread scores out more
+SCORE_SHIFT     = 2.0      # centre of the sigmoid — shift right = stricter 50% threshold
 
-    all_files = list(Path(dataset_path).rglob("*"))
-    print(f"Total files found: {len(all_files)}")
+for d in (CHROMA_DIR, UPLOAD_DIR):
+    Path(d).mkdir(exist_ok=True)
 
-    return dataset_path
+# ══════════════════════════════════════════════════════════════════════════════
+# FAST SKIP-LIST  (indexed_files.txt — one filename per line)
+# ══════════════════════════════════════════════════════════════════════════════
 
+def load_indexed_set() -> set[str]:
+    p = Path(INDEXED_FILE)
+    if not p.exists():
+        return set()
+    return {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()}
 
-# ══════════════════════════════════════════════════════════════
-# STEP 1 — OCR (FIXED)
-# ══════════════════════════════════════════════════════════════
+def mark_indexed(filename: str):
+    with open(INDEXED_FILE, "a", encoding="utf-8") as f:
+        f.write(filename + "\n")
 
-def ocr_pdf(path: str) -> str:
-    import fitz  # PyMuPDF
-    from PIL import Image
+# ══════════════════════════════════════════════════════════════════════════════
+# EMBEDDING MODEL  (singleton, lazy-loaded)
+# ══════════════════════════════════════════════════════════════════════════════
 
+_embed_model = None
+
+def get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        print(f"  Loading embedding model: {EMBED_MODEL} (CPU) …")
+        _embed_model = SentenceTransformer(EMBED_MODEL, device="cpu")
+    return _embed_model
+
+BGE_PREFIX = "Represent this sentence for searching relevant passages: "
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    vecs = get_embed_model().encode(
+        texts, normalize_embeddings=True,
+        batch_size=64, show_progress_bar=len(texts) > 20,
+    )
+    return [v.tolist() for v in vecs]
+
+def embed_query(query: str) -> list[float]:
+    vec = get_embed_model().encode(
+        [BGE_PREFIX + query], normalize_embeddings=True
+    )[0]
+    return vec.tolist()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RERANKER  (singleton — loaded once, reused for every search)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_reranker = None
+
+def get_reranker():
+    global _reranker
+    if _reranker is None:
+        from sentence_transformers import CrossEncoder
+        print("  Loading reranker model …")
+        _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _reranker
+
+def _sigmoid_pct(raw_score: float) -> int:
+    """Map a raw reranker score → 0-100 integer percentage."""
+    return round(100 / (1 + math.exp(-SCORE_SCALE * (raw_score - SCORE_SHIFT))))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEXT EXTRACTION  — native first, OCR only as fallback
+# ══════════════════════════════════════════════════════════════════════════════
+
+_tesseract_ok: bool | None = None
+
+def _tesseract_available() -> bool:
+    global _tesseract_ok
+    if _tesseract_ok is not None:
+        return _tesseract_ok
+    import shutil
+    if shutil.which("tesseract"):
+        _tesseract_ok = True
+        return True
+    try:
+        r = subprocess.run([TESSERACT_CMD, "--version"], capture_output=True, timeout=5)
+        _tesseract_ok = (r.returncode == 0)
+    except Exception:
+        _tesseract_ok = False
+    return _tesseract_ok
+
+def _native_text(path: str) -> str:
+    """Extract embedded text from a PDF using PyMuPDF. Returns '' on failure."""
+    import fitz
     text = ""
-
     try:
         doc = fitz.open(path)
-
         for page in doc:
-            pix = page.get_pixmap()
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-            page_text = pytesseract.image_to_string(img, lang="eng")
-            text += page_text + "\n"
-
+            text += page.get_text() + "\n"
+        doc.close()
     except Exception as e:
-        print(f"OCR PDF failed on {path}: {e}")
-
+        print(f"    PyMuPDF error: {e}")
     return text.strip()
 
-
-def ocr_image(path: str) -> str:
-    from PIL import Image
+def _ocr_page(img_path: str) -> str:
+    out_base = img_path + "_tess"
     try:
-        return pytesseract.image_to_string(Image.open(path), lang="eng")
+        subprocess.run(
+            [TESSERACT_CMD, img_path, out_base, "-l", "eng", "txt"],
+            capture_output=True, timeout=OCR_TIMEOUT,
+        )
+        txt = Path(out_base + ".txt")
+        if txt.exists():
+            result = txt.read_text(encoding="utf-8", errors="ignore")
+            txt.unlink(missing_ok=True)
+            return result
+    except subprocess.TimeoutExpired:
+        print(f"    ⚠ Tesseract timed out ({OCR_TIMEOUT}s) — skipping page")
     except Exception as e:
-        print(f"OCR image failed: {e}")
+        print(f"    ⚠ Tesseract error: {e}")
+    return ""
+
+def _ocr_pdf(path: str) -> str:
+    if not _tesseract_available():
         return ""
+    import fitz
+    from PIL import Image
+    text = ""
+    try:
+        doc = fitz.open(path)
+        for page in doc:
+            pix = page.get_pixmap(dpi=OCR_DPI)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                img.save(tmp.name)
+                tmp_path = tmp.name
+            try:
+                text += _ocr_page(tmp_path) + "\n"
+            finally:
+                try: os.unlink(tmp_path)
+                except: pass
+        doc.close()
+    except Exception as e:
+        print(f"    OCR fallback error: {e}")
+    return text.strip()
 
-
-def extract_text(file_path: str) -> str:
+def extract_text(file_path: str) -> tuple[str, str]:
+    """
+    Returns (text, method) where method is 'native', 'tesseract', or 'none'.
+    OCR is ONLY attempted when native extraction yields fewer than 30 characters.
+    """
     ext = Path(file_path).suffix.lower()
 
     if ext == ".pdf":
-        text = ocr_pdf(file_path)
-    elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
-        text = ocr_image(file_path)
+        native = _native_text(file_path)
+        print(f"    native chars: {len(native)}")
+
+        # ── KEY FIX: early return if native text is good ──────────────────────
+        if len(native) >= 30:
+            text, method = native, "native"
+        else:
+            # Scanned PDF — fall back to Tesseract
+            print(f"    → OCR fallback (native too short)")
+            ocr = _ocr_pdf(file_path)
+            if ocr:
+                text, method = ocr, "tesseract"
+            elif native:
+                text, method = native, "native"
+            else:
+                text, method = "", "none"
+
+    elif ext in (".png", ".jpg", ".jpeg", ".webp"):
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            Image.open(file_path).save(tmp.name)
+            tmp_path = tmp.name
+        text = _ocr_page(tmp_path)
+        try: os.unlink(tmp_path)
+        except: pass
+        method = "tesseract"
+
     else:
-        return ""
+        return "", "none"
 
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text.replace("\xa0", " "))
+    return text.strip(), method
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTACT EXTRACTION
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ══════════════════════════════════════════════════════════════
-# STEP 2 — CHUNKING
-# ══════════════════════════════════════════════════════════════
+def extract_contact(text: str) -> dict:
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    email_m  = re.search(r"[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}", text)
+    email    = email_m.group(0).lower() if email_m else ""
+
+    phone = ""
+    m = re.search(r"\+?[\d][\d\s\-().]{8,14}[\d]", text[:600])
+    if m:
+        phone = m.group(0).strip()
+
+    linkedin_m = re.search(r"linkedin\.com/in/[\w\-]+", text, re.I)
+    linkedin   = linkedin_m.group(0) if linkedin_m else ""
+
+    name = ""
+    for line in lines[:10]:
+        if re.search(r"[@|http|www|\d{4,}|CV|Resume|curriculum]", line, re.I):
+            continue
+        words = line.split()
+        if 2 <= len(words) <= 5 and len(line) < 55 and line[0].isupper():
+            name = line
+            break
+
+    return {"name": name, "email": email, "phone": phone, "linkedin": linkedin}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION-AWARE CHUNKING
+# ══════════════════════════════════════════════════════════════════════════════
 
 SECTION_KEYWORDS = {
-    "skills":     r"skill|technolog|tools",
-    "experience": r"experience|work|employment",
-    "education":  r"education|university|college",
-    "projects":   r"project|portfolio",
-    "summary":    r"summary|profile|objective",
+    "skills":     r"\b(skills?|technologies|tools|competenc|tech stack|languages|frameworks)\b",
+    "experience": r"\b(experience|work history|employment|career|positions? held|professional)\b",
+    "education":  r"\b(education|university|college|degree|academic|graduation|schooling|studied)\b",
+    "projects":   r"\b(projects?|portfolio|github|capstone|personal work|side project)\b",
+    "summary":    r"\b(summary|profile|objective|about me|overview|introduction|bio)\b",
+    "contact":    r"\b(contact|email|phone|address|linkedin|reach me|get in touch)\b",
+    "certif":     r"\b(certifications?|licenses?|awards?|achievements?|honors?|recognition)\b",
+    "training":   r"\b(training|courses?|workshops?|bootcamp|udemy|coursera|mooc)\b",
+    "languages":  r"\b(languages?|spoken|fluent|native|bilingual)\b",
+    "volunteer":  r"\b(volunteer|community|non-?profit|charity|social work)\b",
 }
 
-
-def detect_section(line: str):
-    if len(line.strip()) > 50 or line.strip().endswith("."):
-        return None
-
-    for section, pattern in SECTION_KEYWORDS.items():
-        if re.search(pattern, line, re.I):
-            return section
-    return None
-
+_FALSE_POS = re.compile(
+    r"\b(professional experience|work experience|education background|"
+    r"technical skills|soft skills|career objective|bachelor|master|"
+    r"computer science|information technology|university of|college of)\b", re.I,
+)
 
 @dataclass
 class Chunk:
     section: str
-    text: str
+    text:    str
+    contact: dict = field(default_factory=dict)
 
+def detect_section(line: str) -> str | None:
+    s = line.strip()
+    if not s or len(s) > 55 or s.endswith((".", ",", ";", ":")):
+        return None
+    if not re.search(r"[a-zA-Z]", s) or len(s.split()) > 7:
+        return None
+    for section, pattern in SECTION_KEYWORDS.items():
+        if re.search(pattern, s, re.I):
+            if _FALSE_POS.search(s):
+                return None
+            return section
+    return None
 
-def chunk_text(text: str):
-    chunks, current_section, buffer = [], "header", []
+def chunk_text(text: str, contact: dict) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    current_section = "summary"
+    buffer: list[str] = []
 
     for line in text.splitlines():
         hit = detect_section(line)
-
         if hit:
             if buffer:
                 joined = "\n".join(buffer).strip()
                 if joined:
-                    chunks.append(Chunk(current_section, joined))
-            current_section, buffer = hit, []
+                    chunks.append(Chunk(current_section, joined, contact))
+            current_section = hit
+            buffer = []
         else:
             buffer.append(line)
 
     if buffer:
         joined = "\n".join(buffer).strip()
         if joined:
-            chunks.append(Chunk(current_section, joined))
+            chunks.append(Chunk(current_section, joined, contact))
 
-    return chunks
+    # Merge tiny chunks into the previous one
+    merged: list[Chunk] = []
+    for c in chunks:
+        real = len(re.sub(r"\s+", "", c.text))
+        if real < MIN_CHUNK_CHARS and merged:
+            merged[-1] = Chunk(merged[-1].section,
+                               merged[-1].text + "\n" + c.text,
+                               merged[-1].contact)
+        elif real >= MIN_CHUNK_CHARS:
+            merged.append(c)
 
+    return merged
 
-# ══════════════════════════════════════════════════════════════
-# STEP 3 — EMBEDDINGS
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# CHROMADB STORAGE
+# ══════════════════════════════════════════════════════════════════════════════
 
-_model = None
+_collection = None
 
-def get_model():
-    global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer
-        print("Loading embedding model...")
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _model
+def get_collection():
+    global _collection
+    if _collection is None:
+        import chromadb
+        client = chromadb.PersistentClient(path=CHROMA_DIR)
+        _collection = client.get_or_create_collection(
+            name=COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+    return _collection
 
-
-@dataclass
-class Embedded:
-    file: str
-    section: str
-    text: str
-    embedding: list
-
-
-def embed_chunks(chunks, file_name):
-    model = get_model()
-
-    texts = [c.text for c in chunks if c.text.strip()]
-    if not texts:
-        return []
-
-    vectors = model.encode(texts, normalize_embeddings=True)
-
-    return [
-        Embedded(file_name, c.section, c.text, v.tolist())
-        for c, v in zip(chunks, vectors)
-    ]
-
-
-# ══════════════════════════════════════════════════════════════
-# STEP 4 — SAVE & LOAD
-# ══════════════════════════════════════════════════════════════
-
-EMBEDDINGS_FILE = "cv_embeddings.json"
-
-def save(data):
-    records = [
-        {"file": d.file, "section": d.section,
-         "text": d.text, "embedding": d.embedding}
-        for d in data
-    ]
-    Path(EMBEDDINGS_FILE).write_text(json.dumps(records, indent=2, ensure_ascii=False))
-    print(f"\nSaved {len(records)} chunks → {EMBEDDINGS_FILE}")
-
-
-def load():
-    records = json.loads(Path(EMBEDDINGS_FILE).read_text())
-    return [Embedded(**r) for r in records]
-
-
-# ══════════════════════════════════════════════════════════════
-# STEP 5 — SEARCH
-# ══════════════════════════════════════════════════════════════
-
-def cosine(a, b):
-    return float(np.dot(a, b))  # normalized
-
-
-def search(query: str, data, top_k=5):
-    model = get_model()
-    qv = model.encode([query], normalize_embeddings=True)[0]
-
-    scored = sorted(data, key=lambda x: cosine(qv, x.embedding), reverse=True)
-
-    return [
-        {"file": r.file, "section": r.section,
-         "score": round(cosine(qv, r.embedding), 4),
-         "text": r.text}
-        for r in scored[:top_k]
-    ]
-
-
-def print_results(results):
-    if not results:
-        print("⚠️ No results found\n")
+def upsert_records(chunks: list[Chunk], file_name: str):
+    if not chunks:
         return
+    texts = [c.text for c in chunks]
+    vecs  = embed_texts(texts)
+    ids, docs, metas, embeddings = [], [], [], []
 
-    for i, r in enumerate(results, 1):
-        print(f"  #{i}  {r['file']}")
-        print(f"       Score   : {r['score']}")
-        print(f"       Section : {r['section']}")
-        print(f"       Preview : {r['text'][:120]}")
-        print()
+    for chunk, vec in zip(chunks, vecs):
+        chunk_id = f"{file_name}::{chunk.section}::{uuid.uuid4().hex[:8]}"
+        ids.append(chunk_id)
+        docs.append(chunk.text)
+        embeddings.append(vec)
+        metas.append({
+            "file":     file_name,
+            "section":  chunk.section,
+            "name":     chunk.contact.get("name",     ""),
+            "email":    chunk.contact.get("email",    ""),
+            "phone":    chunk.contact.get("phone",    ""),
+            "linkedin": chunk.contact.get("linkedin", ""),
+        })
 
+    get_collection().upsert(
+        ids=ids, embeddings=embeddings, documents=docs, metadatas=metas
+    )
 
-# ══════════════════════════════════════════════════════════════
-# PROCESSING
-# ══════════════════════════════════════════════════════════════
-def process_file(file_path):
-    print(f"\nProcessing: {file_path}")
+def count_chunks() -> int:
+    return get_collection().count()
 
-    text = extract_text(file_path)
+def processed_files() -> set[str]:
+    """
+    Primary: read from the fast skip-list file.
+    Fallback: query ChromaDB (slower — used only if the file doesn't exist).
+    """
+    if Path(INDEXED_FILE).exists():
+        return load_indexed_set()
+    col = get_collection()
+    if col.count() == 0:
+        return set()
+    result = col.get(include=["metadatas"])
+    return {m["file"] for m in result["metadatas"]}
 
-    if not text:
-        print("⚠️ Empty OCR result — skipping")
+def get_all_documents() -> list[dict]:
+    col = get_collection()
+    if col.count() == 0:
+        return []
+    result = col.get(include=["documents", "metadatas"])
+    return [
+        {"id": did, "document": doc, "metadata": meta}
+        for did, doc, meta in zip(result["ids"], result["documents"], result["metadatas"])
+    ]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BM25 INDEX
+# ══════════════════════════════════════════════════════════════════════════════
+
+def rebuild_bm25():
+    from rank_bm25 import BM25Okapi
+    rows = get_all_documents()
+    if not rows:
+        return None, []
+    corpus  = [r["document"].lower().split() for r in rows]
+    doc_ids = [r["id"] for r in rows]
+    bm25    = BM25Okapi(corpus)
+    with open(BM25_FILE, "wb") as f:
+        pickle.dump({"bm25": bm25, "ids": doc_ids}, f)
+    print(f"  BM25 saved — {len(doc_ids)} chunks")
+    return bm25, doc_ids
+
+def load_bm25():
+    if not Path(BM25_FILE).exists():
+        return None, []
+    with open(BM25_FILE, "rb") as f:
+        data = pickle.load(f)
+    return data["bm25"], data["ids"]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTELLIGENT SEARCH  — hybrid RRF + reranker + fit percentage
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _rrf(dense_ids: list, sparse_ids: list, k: int = 60) -> list[tuple[str, float]]:
+    scores: dict[str, float] = {}
+    for rank, doc_id in enumerate(dense_ids):
+        scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+    for rank, doc_id in enumerate(sparse_ids):
+        scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+def _extract_years(text: str) -> int:
+    matches = re.findall(r"(\d+)\+?\s*year", text, re.I)
+    return max((int(m) for m in matches), default=0)
+
+def _score_candidate(candidate: dict, query: str) -> dict:
+    all_text    = " ".join(candidate["all_chunks"]).lower()
+    query_words = [w.lower() for w in query.split() if len(w) > 2]
+
+    keyword_hits = sum(1 for w in query_words if w in all_text)
+    hit_ratio    = keyword_hits / max(len(query_words), 1)
+    years        = _extract_years(all_text)
+
+    sections_matched = list(dict.fromkeys(candidate.get("sections_found", [])))
+
+    # Fit percentage — prefer rerank_score if available, else derive from hit_ratio
+    if "rerank_score" in candidate:
+        fit_pct = _sigmoid_pct(candidate["rerank_score"])
+    else:
+        fit_pct = round(hit_ratio * 100)
+
+    # Clamp: a partial hit_ratio=0 candidate should still show at least 1%
+    fit_pct = max(1, min(99, fit_pct))
+
+    score = candidate.get("rerank_score", candidate["rrf_score"])
+    if fit_pct >= 70 or hit_ratio >= 0.7:
+        quality = "strong"
+    elif fit_pct >= 45 or hit_ratio >= 0.4:
+        quality = "good"
+    else:
+        quality = "partial"
+
+    candidate.update({
+        "keyword_hits":    keyword_hits,
+        "years_exp":       years,
+        "match_quality":   quality,
+        "hit_ratio":       round(hit_ratio, 2),
+        "fit_pct":         fit_pct,
+        "sections_matched": sections_matched,
+    })
+    return candidate
+
+def search(
+    query:          str,
+    top_k:          int  = 5,
+    section_filter: str | None = None,
+    use_reranker:   bool = True,
+) -> list[dict]:
+    col = get_collection()
+    if col.count() == 0:
         return []
 
-    chunks = chunk_text(text)
-    print(f"Chunks created: {len(chunks)}")
+    qvec = embed_query(query)
 
-    return embed_chunks(chunks, Path(file_path).name)
+    # ── Dense retrieval (ChromaDB cosine similarity) ───────────────────────────
+    n     = min(N_DENSE_FETCH, col.count())
+    where = {"section": section_filter} if section_filter else None
+    r     = col.query(
+        query_embeddings=[qvec], n_results=n, where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+    dense_ids = r["ids"][0] if r["ids"] else []
 
+    # ── Sparse retrieval (BM25 keyword) ───────────────────────────────────────
+    bm25, bm25_ids = load_bm25()
+    sparse_ids: list[str] = []
+    if bm25 and bm25_ids:
+        bm25_scores = bm25.get_scores(query.lower().split())
+        ranked      = sorted(range(len(bm25_scores)),
+                             key=lambda i: bm25_scores[i], reverse=True)
+        sparse_ids  = [bm25_ids[i] for i in ranked if float(bm25_scores[i]) > 0]
 
+    # ── RRF fusion ────────────────────────────────────────────────────────────
+    fused = _rrf(dense_ids, sparse_ids)
+    if not fused:
+        return []
 
-def process_dataset(folder_path):
-   
-    all_data = load() if Path(EMBEDDINGS_FILE).exists() else []
-    
-    
-    processed_files = {d['file'] for d in all_data}
-    
-    files = list(Path(folder_path).rglob("*.pdf"))
-    print(f"\nFound {len(files)} PDF files. Already processed: {len(processed_files)}")
+    # Fetch fused chunks
+    all_ids  = [fid for fid, _ in fused]
+    fetched  = col.get(ids=all_ids, include=["documents", "metadatas"])
+    id_to_doc = {
+        did: {"document": doc, "metadata": meta}
+        for did, doc, meta in zip(
+            fetched["ids"], fetched["documents"], fetched["metadatas"]
+        )
+    }
 
-    for i, file in enumerate(files):
-        
-        if file.name in processed_files:
+    # ── Deduplicate: one entry per candidate, merge all their chunks ───────────
+    best: dict[str, dict] = {}
+    for doc_id, rrf_score in fused:
+        if doc_id not in id_to_doc:
+            continue
+        row   = id_to_doc[doc_id]
+        meta  = row["metadata"]
+        fname = meta.get("file", doc_id)
+
+        if fname not in best:
+            best[fname] = {
+                "id":             doc_id,
+                "text":           row["document"],
+                "metadata":       meta,
+                "rrf_score":      rrf_score,
+                "all_chunks":     [row["document"]],
+                "sections_found": [meta.get("section", "")],
+            }
+        else:
+            best[fname]["all_chunks"].append(row["document"])
+            best[fname]["sections_found"].append(meta.get("section", ""))
+            best[fname]["text"] = "\n\n".join(best[fname]["all_chunks"])
+
+    candidates = sorted(best.values(), key=lambda x: x["rrf_score"], reverse=True)
+
+    # ── CrossEncoder reranker (singleton — loaded once) ───────────────────────
+    if use_reranker and candidates:
+        try:
+            reranker = get_reranker()
+            pairs    = [(query, c["text"][:2000]) for c in candidates]
+            rscores  = reranker.predict(pairs)
+            for c, s in zip(candidates, rscores):
+                c["rerank_score"] = float(s)
+            candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+        except Exception as e:
+            print(f"  Reranker skipped: {e}")
+
+    return [_score_candidate(c, query) for c in candidates[:top_k]]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INGESTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def process_file(file_path: str) -> tuple[bool, str]:
+    name = Path(file_path).name
+    print(f"\n  Processing: {name}")
+    try:
+        text, method = extract_text(file_path)
+        print(f"  Extraction: {method} | {len(text)} chars")
+        if not text.strip():
+            return False, f"⚠ {name} — no text extracted"
+        contact = extract_contact(text)
+        print(f"  Contact: {contact['name']} <{contact['email']}>")
+        chunks = chunk_text(text, contact)
+        print(f"  Chunks: {len(chunks)}")
+        if not chunks:
+            return False, f"⚠ {name} — no usable chunks"
+        upsert_records(chunks, name)
+        mark_indexed(name)   # write to skip-list immediately
+        return True, f"✅ {name} — {len(chunks)} chunks [{method}]"
+    except Exception as e:
+        return False, f"❌ {name} — {e}"
+
+def process_dataset(folder_path: str, limit: int = 0, progress_cb=None):
+    def log(msg):
+        print(msg)
+        if progress_cb:
+            progress_cb(msg)
+
+    done  = processed_files()
+    files = sorted(Path(folder_path).rglob("*.pdf"))
+    if limit > 0:
+        files = files[:limit]
+
+    log(f"\n  Found {len(files)} PDFs | Already indexed: {len(done)}\n")
+    ok = skipped = failed = 0
+
+    for i, fpath in enumerate(files, 1):
+        if fpath.name in done:
+            log(f"  [{i}/{len(files)}] SKIP: {fpath.name}")
+            skipped += 1
             continue
 
-        try:
-            data = process_file(str(file))
-            all_data.extend(data)
-            print(f"  [{i+1}/{len(files)}] DONE")
-            
-            if (i + 1) % 10 == 0:
-                save(all_data)
-                print(f"  >> Auto-saved at {i+1} files.")
-                
-        except Exception as e:
-            print(f"  SKIP {file.name}: {e}")
+        success, msg = process_file(str(fpath))
+        log(f"  [{i}/{len(files)}] {msg}")
 
-    return all_data
-"""def process_dataset(folder_path):
-    all_data = []
+        if success:
+            ok += 1
+            # Rebuild BM25 periodically, not every single file
+            if ok % BM25_REBUILD_EVERY == 0:
+                log(f"  >> Rebuilding BM25 at {ok} new files…")
+                rebuild_bm25()
+        else:
+            failed += 1
 
-    files = list(Path(folder_path).rglob("*.pdf"))
-    print(f"\nFound {len(files)} PDF files")
+    log("\n  Final BM25 rebuild…")
+    rebuild_bm25()
+    log(f"\n  Done — {ok} indexed | {skipped} skipped | {failed} failed")
+    log(f"  Total chunks in DB: {count_chunks()}")
+    return {"ok": ok, "skipped": skipped, "failed": failed, "total": count_chunks()}
 
-    for i, file in enumerate(files):
-        try:
-            data = process_file(str(file))
-            all_data.extend(data)
-            print(f"  [{i+1}/{len(files)}] DONE")
-            
-            
-            if (i + 1) % 10 == 0:
-                save(all_data)
-                print(f"  >> Auto-saved at {i+1} files.")
-
-        except Exception as e:
-            print(f"  SKIP {file.name}: {e}")
-
-    return all_data"""
-
-
-# ══════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# CLI
+# ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    if not _tesseract_available():
+        print("⚠ Tesseract not found — scanned PDFs will be skipped.")
+        print("  Install: https://github.com/UB-Mannheim/tesseract/wiki\n")
 
-    force = "--rebuild" in sys.argv
+    if "--rebuild" in sys.argv:
+        import shutil
+        if Path(CHROMA_DIR).exists():   shutil.rmtree(CHROMA_DIR)
+        if Path(BM25_FILE).exists():    Path(BM25_FILE).unlink()
+        if Path(INDEXED_FILE).exists(): Path(INDEXED_FILE).unlink()
+        print("Cleared existing indexes.\n")
 
-    if Path(EMBEDDINGS_FILE).exists() and not force:
-        data = load()
+    n = count_chunks()
+    if n > 0 and "--rebuild" not in sys.argv:
+        print(f"✅ {n} chunks already in ChromaDB. Run app.py for the UI.")
+        print("   Use --rebuild to re-index from scratch.")
+        sys.exit(0)
 
-        if len(data) == 0:
-            print("⚠️ Empty embeddings — rebuilding...")
-            Path(EMBEDDINGS_FILE).unlink()
-            force = True
-        else:
-            print(f"Loaded {len(data)} chunks\n")
-
-    if not Path(EMBEDDINGS_FILE).exists() or force:
-
-        if "--kaggle" in sys.argv:
-            folder = load_kaggle_dataset()
-        elif "--dataset" in sys.argv:
-            idx = sys.argv.index("--dataset")
-            folder = sys.argv[idx + 1]
-        else:
-            print("Usage:")
-            print("  python pipeline.py --kaggle --rebuild")
-            print("  python pipeline.py --dataset <folder>")
-            sys.exit(1)
-
-        data = process_dataset(folder)
-        save(data)
-
-    # TEST SEARCH
-    print("\n=== SEARCH TEST ===\n")
-    print_results(search("python machine learning", data, 3))
-
-    # INTERACTIVE
-    while True:
+    if "--kaggle" in sys.argv:
         try:
-            q = input("\nSearch > ").strip()
-            if not q:
-                continue
-            print_results(search(q, data))
-        except KeyboardInterrupt:
-            print("\nDone.")
-            break
+            import kagglehub
+            folder = kagglehub.dataset_download("hadikp/resume-data-pdf")
+        except ImportError:
+            print("❌ pip install kagglehub"); sys.exit(1)
+    elif "--dataset" in sys.argv:
+        idx    = sys.argv.index("--dataset")
+        folder = sys.argv[idx + 1]
+    else:
+        print("Usage:")
+        print("  python pipeline.py --dataset <folder>")
+        print("  python pipeline.py --dataset <folder> --limit 100")
+        print("  python pipeline.py --dataset <folder> --rebuild")
+        print("  python pipeline.py --kaggle")
+        sys.exit(1)
+
+    limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else 0
+    process_dataset(folder, limit=limit)
+    print("\nDone. Run:  python app.py")
