@@ -3,8 +3,7 @@ HR Assistant — CV RAG System
 Run:  python app.py
 Open: http://localhost:7860
 """
-from dotenv import load_dotenv
-load_dotenv()
+
 import os, smtplib
 from pathlib import Path
 from email.mime.text      import MIMEText
@@ -15,11 +14,12 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import gradio as gr
 from pipeline import (
     process_file, process_dataset,
-    rebuild_bm25, count_chunks, processed_files, search,
+    rebuild_bm25, count_chunks, processed_files,
 )
+from query_rewriter import smart_search, MIN_FIT_DEFAULT
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EMAIL CONFIG & TEMPLATES
+# EMAIL CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -28,39 +28,14 @@ SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 HR_NAME   = os.getenv("HR_NAME",   "HR Team")
 
-EMAIL_TEMPLATES = {
-    "Manual / Custom": "",
-    "Schedule Interview": (
-        "Dear {name},\n\n"
-        "We were impressed with your profile and would like to schedule a brief interview "
-        "to discuss your experience further.\n\n"
-        "Please let us know your availability for next week.\n\n"
-        "Best regards,\n{hr_name}"
-    ),
-    "Ask Questions": (
-        "Dear {name},\n\n"
-        "Thank you for your application. We are currently reviewing your profile and "
-        "have a few follow-up questions regarding your recent projects.\n\n"
-        "Could you please provide more details on your role in these tasks?\n\n"
-        "Best regards,\n{hr_name}"
-    )
-}
-
 SECTIONS = ["Any", "skills", "experience", "education", "projects",
             "summary", "certif", "training", "languages", "volunteer"]
 
 _last_results: list[dict] = []
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EMAIL LOGIC
+# EMAIL
 # ══════════════════════════════════════════════════════════════════════════════
-
-def update_template(template_name, recipient_name):
-    """Updates the message body when a template is selected."""
-    text = EMAIL_TEMPLATES.get(template_name, "")
-    if template_name != "Manual / Custom":
-        return text.format(name=recipient_name or "Candidate", hr_name=HR_NAME)
-    return text
 
 def send_email(to_addr: str, name: str, subject: str, body: str) -> str:
     if not SMTP_USER or not SMTP_PASS:
@@ -72,9 +47,7 @@ def send_email(to_addr: str, name: str, subject: str, body: str) -> str:
         msg["Subject"] = subject
         msg["From"]    = f"{HR_NAME} <{SMTP_USER}>"
         msg["To"]      = to_addr
-        # Replace {name} placeholder if user didn't use the template system
-        final_body = body.replace("{name}", name or "Candidate")
-        msg.attach(MIMEText(final_body, "plain"))
+        msg.attach(MIMEText(body.replace("{name}", name or "Candidate"), "plain"))
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
             s.ehlo(); s.starttls(); s.login(SMTP_USER, SMTP_PASS)
             s.sendmail(SMTP_USER, to_addr, msg.as_string())
@@ -113,10 +86,11 @@ def db_stats() -> str:
     return f"📦 {n:,} chunks  |  {d:,} CVs indexed"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FIT PERCENTAGE RING (SVG) & CANDIDATE CARD
+# FIT PERCENTAGE RING  (SVG donut)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fit_ring(pct: int, quality: str) -> str:
+    """Return a small inline SVG donut showing the fit percentage."""
     color = {"strong": "#16a34a", "good": "#d97706", "partial": "#3b82f6"}.get(quality, "#64748b")
     r     = 18
     circ  = 2 * 3.14159 * r
@@ -131,6 +105,10 @@ def _fit_ring(pct: int, quality: str) -> str:
         f' font-family="sans-serif" fill="{color}">{pct}%</text>'
         f'</svg>'
     )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CANDIDATE CARD  (rich HTML)
+# ══════════════════════════════════════════════════════════════════════════════
 
 QUALITY_STYLE = {
     "strong":  ("background:#dcfce7;color:#166534", "Strong match"),
@@ -150,139 +128,436 @@ def _candidate_card(rank: int, r: dict) -> str:
     years    = r.get("years_exp", 0)
     hits     = r.get("keyword_hits", 0)
     sections = list(dict.fromkeys(r.get("sections_found", [])))[:5]
+
     q_style, q_label = QUALITY_STYLE.get(quality, QUALITY_STYLE["partial"])
+
     ring       = _fit_ring(fit_pct, quality)
     email_link = (f'<a href="mailto:{email}" style="color:#3b82f6;text-decoration:none">'
                   f'{email}</a>') if email else "—"
     li_link    = (f'<a href="https://{linkedin}" target="_blank" '
                   f'style="color:#0077b5;text-decoration:none">LinkedIn ↗</a>') if linkedin else "—"
-    section_pills = "".join(f'<span style="background:#f1f5f9;color:#475569;padding:2px 9px;border-radius:12px;font-size:11px;margin-right:4px;white-space:nowrap">{s}</span>' for s in sections if s)
+
+    section_pills = "".join(
+        f'<span style="background:#f1f5f9;color:#475569;padding:2px 9px;'
+        f'border-radius:12px;font-size:11px;margin-right:4px;white-space:nowrap">{s}</span>'
+        for s in sections if s
+    )
     badges = ""
-    if years: badges += (f'<span style="background:#f0fdf4;color:#166534;padding:2px 9px;border-radius:12px;font-size:11px;margin-right:4px">{years}y exp</span>')
-    if hits: badges += (f'<span style="background:#eff6ff;color:#1d4ed8;padding:2px 9px;border-radius:12px;font-size:11px">{hits} keyword hits</span>')
-    preview = " · ".join(r.get("all_chunks", [r["text"]]))[:480].replace("\n", " ").encode("ascii", errors="ignore").decode("ascii").strip()
+    if years:
+        badges += (f'<span style="background:#f0fdf4;color:#166534;padding:2px 9px;'
+                   f'border-radius:12px;font-size:11px;margin-right:4px">{years}y exp</span>')
+    if hits:
+        badges += (f'<span style="background:#eff6ff;color:#1d4ed8;padding:2px 9px;'
+                   f'border-radius:12px;font-size:11px">{hits} keyword hits</span>')
+
+    preview = (
+        " · ".join(r.get("all_chunks", [r["text"]]))[:480]
+        .replace("\n", " ")
+        .encode("ascii", errors="ignore").decode("ascii")
+        .strip()
+    )
 
     return f"""
-<div style="border:1px solid #e2e8f0;border-radius:14px;padding:18px 20px;margin-bottom:14px;background:#ffffff;font-family:system-ui,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.05)">
+<div style="border:1px solid #e2e8f0;border-radius:14px;padding:18px 20px;
+            margin-bottom:14px;background:#ffffff;font-family:system-ui,sans-serif;
+            box-shadow:0 1px 4px rgba(0,0,0,.05)">
+
+  <!-- Header row -->
   <div style="display:flex;align-items:center;gap:14px">
-    <div style="width:38px;height:38px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:15px;flex-shrink:0">{rank}</div>
+    <!-- Rank badge -->
+    <div style="width:38px;height:38px;border-radius:50%;background:#6366f1;
+                display:flex;align-items:center;justify-content:center;
+                color:#fff;font-weight:700;font-size:15px;flex-shrink:0">
+      {rank}
+    </div>
+
+    <!-- Name + file -->
     <div style="flex:1;min-width:0">
-      <div style="font-size:16px;font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name}</div>
+      <div style="font-size:16px;font-weight:600;color:#0f172a;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name}</div>
       <div style="font-size:12px;color:#94a3b8;margin-top:2px">{file_nm}</div>
     </div>
-    <div style="display:flex;flex-direction:column;align-items:center;gap:2px">{ring}<span style="font-size:10px;color:#94a3b8">fit score</span></div>
-    <span style="{q_style};padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap;flex-shrink:0">{q_label}</span>
+
+    <!-- Fit ring -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+      {ring}
+      <span style="font-size:10px;color:#94a3b8">fit score</span>
+    </div>
+
+    <!-- Quality badge -->
+    <span style="{q_style};padding:4px 12px;border-radius:20px;
+                 font-size:12px;font-weight:600;white-space:nowrap;flex-shrink:0">
+      {q_label}
+    </span>
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid #f1f5f9">
-    <div><div style="font-size:10px;color:#94a3b8;text-transform:uppercase;margin-bottom:3px">Email</div><div style="font-size:13px">{email_link}</div></div>
-    <div><div style="font-size:10px;color:#94a3b8;text-transform:uppercase;margin-bottom:3px">Phone</div><div style="font-size:13px;color:#0f172a">{phone or "—"}</div></div>
-    <div><div style="font-size:10px;color:#94a3b8;text-transform:uppercase;margin-bottom:3px">LinkedIn</div><div style="font-size:13px">{li_link}</div></div>
+
+  <!-- Contact row -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;
+              margin-top:14px;padding-top:12px;border-top:1px solid #f1f5f9">
+    <div>
+      <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;
+                  letter-spacing:.4px;margin-bottom:3px">Email</div>
+      <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis">{email_link}</div>
+    </div>
+    <div>
+      <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;
+                  letter-spacing:.4px;margin-bottom:3px">Phone</div>
+      <div style="font-size:13px;color:#0f172a">{phone or "—"}</div>
+    </div>
+    <div>
+      <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;
+                  letter-spacing:.4px;margin-bottom:3px">LinkedIn</div>
+      <div style="font-size:13px">{li_link}</div>
+    </div>
   </div>
-  <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:4px">{badges}{section_pills}</div>
-  <div style="margin-top:12px;padding:10px 14px;background:#f8fafc;border-radius:8px;font-size:12px;color:#64748b;line-height:1.65">{preview}</div>
-</div>"""
+
+  <!-- Badges + sections -->
+  <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:4px">
+    {badges}{section_pills}
+  </div>
+
+  <!-- Preview -->
+  <div style="margin-top:12px;padding:10px 14px;background:#f8fafc;border-radius:8px;
+              font-size:12px;color:#64748b;line-height:1.65">
+    {preview}
+  </div>
+</div>
+"""
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SEARCH & EMAIL CALLBACKS
+# SEARCH CALLBACK  (now uses smart_search with Groq query rewriting)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def cb_search(query: str, section: str, top_k: int, use_reranker: bool):
+def cb_search(query: str, section: str, top_k: int, use_reranker: bool, min_fit_pct: int):
     global _last_results
     query = query.strip()
-    if not query: return "<div style='text-align:center;padding:40px;color:#94a3b8'>Enter query...</div>", ""
+    if not query:
+        return (
+            "<div style='text-align:center;padding:40px;color:#94a3b8;font-family:sans-serif'>"
+            "Enter a search query above to find candidates.</div>",
+            "",
+        )
+
     sec = section if section != "Any" else None
-    results = search(query, top_k=int(top_k), section_filter=sec, use_reranker=use_reranker)
+    results, rq = smart_search(
+        query,
+        top_k=int(top_k),
+        section_filter=sec,
+        use_reranker=use_reranker,
+        min_fit_pct=int(min_fit_pct),
+    )
     _last_results = results
-    if not results: return "<div style='text-align:center;padding:40px;color:#94a3b8'>No candidates found.</div>", ""
-    cards = "".join(_candidate_card(i + 1, r) for i, r in enumerate(results))
-    status = f"<span style='color:#166534;font-weight:500'>Found <strong>{len(results)}</strong> candidate(s) for \"{query}\"</span>"
-    return cards, status
+
+    # Show what Groq actually searched (only visible when rewrite ran)
+    rewrite_note = ""
+    if rq.rewritten:
+        pills = "".join(
+            f"<span style='background:#f1f5f9;color:#475569;padding:2px 8px;"
+            f"border-radius:10px;font-size:11px;margin-right:4px'>{s}</span>"
+            for s in rq.must_have_skills
+        )
+        rewrite_note = (
+            f"<div style='font-size:12px;color:#64748b;margin-bottom:12px;"
+            f"padding:8px 12px;background:#f8fafc;border-radius:8px'>"
+            f"<b>Searched:</b> {rq.primary}"
+            + (f"<br><b>Must-have skills:</b> {pills}" if pills else "")
+            + (f"<br><b>Min experience:</b> {rq.min_years_exp} years" if rq.min_years_exp else "")
+            + "</div>"
+        )
+
+    if not results:
+        return (
+            rewrite_note +
+            "<div style='text-align:center;padding:40px;color:#94a3b8;font-family:sans-serif'>"
+            f"No candidates found above {int(min_fit_pct)}% fit.</div>",
+            "",
+        )
+
+    cards   = "".join(_candidate_card(i + 1, r) for i, r in enumerate(results))
+    top_fit = results[0].get("fit_pct", 0)
+    status  = (
+        f"<span style='color:#166534;font-weight:500'>"
+        f"Found <strong>{len(results)}</strong> candidate(s) for "
+        f"<em>\"{query}\"</em> — top fit: <strong>{top_fit}%</strong>"
+        + (" · <em>query expanded by Groq</em>" if rq.rewritten else "")
+        + "</span>"
+    )
+    return rewrite_note + cards, status
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EMAIL CALLBACKS
+# ══════════════════════════════════════════════════════════════════════════════
 
 def cb_load_candidates():
-    if not _last_results: return gr.update(choices=[], value=None)
+    if not _last_results:
+        return gr.update(choices=[], value=None)
     choices = []
     for r in _last_results:
-        m = r["metadata"]
-        name = m.get("name") or m.get("file", "—")
+        m     = r["metadata"]
+        name  = m.get("name") or m.get("file", "—")
         email = m.get("email", "")
-        pct = r.get("fit_pct", 0)
-        label = f"[{pct}%] {name} <{email}>" if email else f"[{pct}%] {name}"
+        pct   = r.get("fit_pct", 0)
+        label = f"[{pct}%] {name}  <{email}>" if email else f"[{pct}%] {name}"
         choices.append((label, email))
     return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
-def cb_send_manual(to_addr: str, name: str, template: str, subject: str, body: str) -> str:
-    if not to_addr or "@" not in to_addr: return "❌ Invalid email."
-    return send_email(to_addr, name, subject, body)
+def cb_send_one(email_addr: str, subject: str, body: str) -> str:
+    if not email_addr:
+        return "❌ No candidate selected."
+    name = next(
+        (r["metadata"].get("name", "") for r in _last_results
+         if r["metadata"].get("email") == email_addr),
+        "",
+    )
+    return send_email(email_addr, name, subject, body)
+
+def cb_send_all(subject: str, body: str) -> str:
+    if not _last_results:
+        return "❌ Run a search first."
+    return "\n".join(
+        send_email(
+            r["metadata"].get("email", ""),
+            r["metadata"].get("name", "Candidate"),
+            subject, body,
+        )
+        for r in _last_results
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEFAULT EMAIL TEMPLATE
+# ══════════════════════════════════════════════════════════════════════════════
+
+DEFAULT_SUBJECT = "Interview Invitation — We'd Love to Connect"
+DEFAULT_BODY = """\
+Dear {name},
+
+We have reviewed your CV and are genuinely impressed by your background and experience.
+
+We would like to invite you for an interview for a role that closely matches your profile.
+
+Please reply with your availability, or book a time directly at:
+[CALENDAR LINK]
+
+We look forward to speaking with you.
+
+Best regards,
+The HR Team"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CSS
+# ══════════════════════════════════════════════════════════════════════════════
+
+CSS = """
+#title    { text-align:center; margin-bottom:.2em; }
+#subtitle { text-align:center; color:#64748b; font-size:.93em; margin-bottom:1.4em; }
+.log-box  textarea { font-family:monospace; font-size:.82em; }
+#results-html { max-height:720px; overflow-y:auto; padding-right:4px; }
+"""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 
-CSS = """
-#title { text-align:center; margin-bottom:.2em; }
-#results-html { max-height:720px; overflow-y:auto; padding-right:4px; }
-"""
-
 with gr.Blocks(title="HR Assistant — CV RAG", css=CSS) as demo:
+
     gr.Markdown("# HR Assistant — CV Search", elem_id="title")
+    gr.Markdown(
+        "Index your CV dataset once. Search with natural language. "
+        "Each result shows a **fit percentage**, match quality, years of experience, and contact info.",
+        elem_id="subtitle",
+    )
 
     with gr.Tabs():
-        # SEARCH TAB
-        with gr.Tab("🔍 Search Candidates"):
-            with gr.Row():
-                query_box = gr.Textbox(label="Search query", scale=5)
-                section_dd = gr.Dropdown(label="Section filter", choices=SECTIONS, value="Any", scale=1)
-                top_k_sl = gr.Slider(label="Top K", minimum=1, maximum=20, value=5, step=1, scale=1)
-                rerank_cb = gr.Checkbox(label="Reranker", value=True, scale=1)
-            search_btn = gr.Button("Search", variant="primary")
-            search_status = gr.HTML("")
-            results_html = gr.HTML("<div style='text-align:center;padding:48px;color:#94a3b8'>Results...</div>", elem_id="results-html")
-            search_btn.click(cb_search, inputs=[query_box, section_dd, top_k_sl, rerank_cb], outputs=[results_html, search_status])
 
-        # UPLOAD TAB
+        # ── Tab 1: Search ─────────────────────────────────────────────────────
+        with gr.Tab("🔍 Search Candidates"):
+            gr.Markdown("### Search by skills, role, experience, or any requirement")
+            gr.Markdown(
+                "Natural language works best — e.g. *'Senior Python developer Django PostgreSQL'* "
+                "or *'junior data analyst Excel Cairo'* or *'machine learning NLP 3 years'*"
+            )
+            with gr.Row():
+                query_box  = gr.Textbox(
+                    label="Search query", scale=5,
+                    placeholder="e.g.  Python machine learning engineer with TensorFlow",
+                )
+                section_dd = gr.Dropdown(
+                    label="Section filter", choices=SECTIONS, value="Any", scale=1,
+                )
+                top_k_sl   = gr.Slider(
+                    label="Top K results", minimum=1, maximum=20, value=5, step=1, scale=1,
+                )
+                rerank_cb  = gr.Checkbox(label="Reranker", value=True, scale=1)
+                min_fit_sl = gr.Slider(
+                    label="Min fit %", minimum=0, maximum=80,
+                    value=MIN_FIT_DEFAULT, step=5, scale=1,
+                )
+
+            search_btn    = gr.Button("Search", variant="primary", size="lg")
+            search_status = gr.HTML("")
+            results_html  = gr.HTML(
+                "<div style='text-align:center;padding:48px;color:#94a3b8;font-family:sans-serif'>"
+                "Your search results will appear here.</div>",
+                elem_id="results-html",
+            )
+
+            search_btn.click(
+                cb_search,
+                inputs=[query_box, section_dd, top_k_sl, rerank_cb, min_fit_sl],
+                outputs=[results_html, search_status],
+            )
+            query_box.submit(
+                cb_search,
+                inputs=[query_box, section_dd, top_k_sl, rerank_cb, min_fit_sl],
+                outputs=[results_html, search_status],
+            )
+
+        # ── Tab 2: Upload & Ingest ────────────────────────────────────────────
         with gr.Tab("📁 Upload & Ingest"):
+            gr.Markdown(
+                "**Run the dataset once** — already-indexed files are automatically skipped "
+                "on every subsequent run. Use the CLI for large datasets."
+            )
             with gr.Row():
                 with gr.Column(scale=3):
-                    folder_box = gr.Textbox(label="Dataset folder path")
-                    limit_sl = gr.Slider(label="Limit", minimum=0, maximum=2000, value=0, step=10)
+                    gr.Markdown("### Ingest a full folder of CVs")
+                    folder_box = gr.Textbox(
+                        label="Dataset folder path",
+                        placeholder=r"D:\Data\Resumes",
+                    )
+                    limit_sl   = gr.Slider(
+                        label="Limit (0 = all files)", minimum=0, maximum=2000,
+                        value=0, step=10,
+                    )
                     ingest_btn = gr.Button("Start ingestion", variant="primary")
-                    ingest_log = gr.Textbox(label="Log", lines=15)
+                    ingest_log = gr.Textbox(
+                        label="Ingestion log", lines=22, interactive=False,
+                        elem_classes=["log-box"],
+                    )
+
                 with gr.Column(scale=2):
-                    upload_box = gr.File(label="Drop PDF files", file_count="multiple")
-                    upload_btn = gr.Button("Index selected files")
-                    stats_out = gr.Textbox(label="Database status")
-            ingest_btn.click(cb_ingest_folder, inputs=[folder_box, limit_sl], outputs=[ingest_log, stats_out])
-            upload_btn.click(cb_upload, inputs=upload_box, outputs=[stats_out, stats_out])
+                    gr.Markdown("### Upload individual CVs")
+                    upload_box = gr.File(
+                        label="Drop PDF files here", file_types=[".pdf"],
+                        file_count="multiple",
+                    )
+                    upload_btn = gr.Button("Index selected files", variant="secondary")
+                    upload_log = gr.Textbox(label="Result", lines=6, interactive=False)
+                    gr.Markdown("---")
+                    stats_out  = gr.Textbox(label="Database status", interactive=False)
+                    refresh_btn = gr.Button("Refresh stats")
 
-        # EMAIL TAB (UPGRADED)
+            ingest_btn.click(
+                cb_ingest_folder,
+                inputs=[folder_box, limit_sl],
+                outputs=[ingest_log, stats_out],
+            )
+            upload_btn.click(cb_upload, inputs=upload_box, outputs=[upload_log, stats_out])
+            refresh_btn.click(db_stats, outputs=stats_out)
+            demo.load(db_stats, outputs=stats_out)
+
+        # ── Tab 3: Email ──────────────────────────────────────────────────────
         with gr.Tab("✉️ Send Emails"):
-            gr.Markdown("### Email Configuration")
+            gr.Markdown("### Send interview invitations from your last search")
+            gr.Markdown("Use `{name}` in the body for personalisation.")
+            load_btn     = gr.Button("Load candidates from last search")
+            candidate_dd = gr.Dropdown(label="Select candidate", choices=[], interactive=True)
+            subject_box  = gr.Textbox(label="Subject", value=DEFAULT_SUBJECT)
+            body_box     = gr.Textbox(label="Email body", value=DEFAULT_BODY, lines=14)
             with gr.Row():
-                manual_to = gr.Textbox(label="Recipient email", placeholder="candidate@example.com", scale=2)
-                manual_name = gr.Textbox(label="Recipient name (optional)", scale=1)
-            
-            # Template Dropdown
-            template_dd = gr.Dropdown(
-                label="Choose a template", 
-                choices=list(EMAIL_TEMPLATES.keys()), 
-                value="Manual / Custom"
-            )
-            
-            manual_subject = gr.Textbox(label="Subject", value="Regarding your application")
-            manual_body = gr.Textbox(label="Email body", lines=10, placeholder="Choose a template or write here...")
-            
-            # Logic: When template or name changes, update body
-            template_dd.change(fn=update_template, inputs=[template_dd, manual_name], outputs=manual_body)
-            manual_name.change(fn=update_template, inputs=[template_dd, manual_name], outputs=manual_body)
+                send_one_btn = gr.Button("Send to selected",    variant="primary")
+                send_all_btn = gr.Button("Send to ALL results", variant="stop")
+            email_out = gr.Textbox(label="Status", lines=8, interactive=False)
 
-            manual_send_btn = gr.Button("Send email", variant="primary")
-            manual_out = gr.Textbox(label="Status", interactive=False)
-            
-            manual_send_btn.click(
-                cb_send_manual,
-                inputs=[manual_to, manual_name, template_dd, manual_subject, manual_body],
-                outputs=manual_out
+            load_btn.click(cb_load_candidates, outputs=candidate_dd)
+            send_one_btn.click(
+                cb_send_one,
+                inputs=[candidate_dd, subject_box, body_box],
+                outputs=email_out,
             )
+            send_all_btn.click(
+                cb_send_all,
+                inputs=[subject_box, body_box],
+                outputs=email_out,
+            )
+
+        # ── Tab 4: Setup guide ────────────────────────────────────────────────
+        with gr.Tab("⚙️ Setup"):
+            gr.Markdown("""
+## Quick-start guide
+
+### 1 — Install dependencies
+```bash
+pip install gradio sentence-transformers chromadb rank-bm25 pymupdf pillow groq
+```
+
+### 2 — Set your Groq API key (free at https://console.groq.com)
+```bash
+set GROQ_API_KEY=gsk_...        # Windows
+export GROQ_API_KEY=gsk_...     # Mac / Linux
+```
+
+### 3 — Configure Tesseract (only needed for scanned PDFs)
+Download from: https://github.com/UB-Mannheim/tesseract/wiki  
+Then set `TESSERACT_CMD` in `pipeline.py` to your install path.
+
+### 4 — Index your dataset (run once, resumes on interrupt)
+```bash
+# From a local folder
+python pipeline.py --dataset "D:/path/to/CVs"
+
+# With a file limit (great for testing)
+python pipeline.py --dataset "D:/path/to/CVs" --limit 100
+
+# From Kaggle directly
+python pipeline.py --kaggle
+
+# Start completely fresh
+python pipeline.py --dataset "D:/path/to/CVs" --rebuild
+```
+Already-indexed files are tracked in `indexed_files.txt` and skipped automatically.
+
+### 5 — Start the web app
+```bash
+python app.py
+# Open: http://localhost:7860
+```
+
+### 6 — Email setup (Gmail)
+1. Enable 2-step verification on your Google account  
+2. Go to Google Account → Security → App Passwords → create one  
+3. Set before running:
+```bash
+set SMTP_USER=you@gmail.com
+set SMTP_PASS=your_app_password
+python app.py
+```
+
+---
+
+### How smart search works
+Every query is first sent to **Groq (free)** which expands it:
+- Abbreviations expanded: ML → machine learning, k8s → Kubernetes
+- Synonyms added: React → React.js / ReactJS
+- Must-have skills extracted and used as hard filters
+- Min years of experience parsed and enforced
+
+Then 2–3 query variants run through the full hybrid pipeline (BM25 + ChromaDB → RRF → reranker).
+
+### How fit percentage works
+Each candidate gets a **0–100% fit score** calculated from:
+- **Semantic similarity** — how closely the CV meaning matches your query (via the BGE embedding model)
+- **Keyword overlap** — how many of your query words appear in the CV text
+- **CrossEncoder reranking** — a second model that reads the query and CV together for a more precise score
+
+The final percentage is mapped through a sigmoid function so scores spread naturally across the range.
+
+| Badge | Fit % | Meaning |
+|---|---|---|
+| Strong match | ≥ 70% | High semantic + keyword match |
+| Good match   | 45–69% | Moderate relevance |
+| Partial      | < 45%  | Low match, shown for completeness |
+""")
 
 if __name__ == "__main__":
     demo.launch(server_name="localhost", server_port=7860, share=False)
