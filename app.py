@@ -4,7 +4,7 @@ Run:  python app.py
 Open: http://localhost:7860
 """
 
-import os, smtplib
+import os, math, smtplib
 from pathlib import Path
 from email.mime.text      import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -17,6 +17,7 @@ from pipeline import (
     rebuild_bm25, count_chunks, processed_files,
 )
 from query_rewriter import smart_search, MIN_FIT_DEFAULT
+from RetriveCVAgent import run_agent_turn
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EMAIL CONFIG
@@ -86,35 +87,42 @@ def db_stats() -> str:
     return f"📦 {n:,} chunks  |  {d:,} CVs indexed"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FIT PERCENTAGE RING  (SVG donut)
+# FIT SCORE GAUGE  (analog light-meter style SVG dial)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _fit_ring(pct: int, quality: str) -> str:
-    """Return a small inline SVG donut showing the fit percentage."""
-    color = {"strong": "#16a34a", "good": "#d97706", "partial": "#3b82f6"}.get(quality, "#64748b")
-    r     = 18
-    circ  = 2 * 3.14159 * r
-    dash  = circ * pct / 100
+QUALITY_STYLE = {
+    "strong":  ("#2F6F4E", "STRONG MATCH"),
+    "good":    ("#9A6B12", "GOOD MATCH"),
+    "partial": ("#6B7177", "PARTIAL"),
+}
+
+def _gauge_svg(pct: int, color: str) -> str:
+    """Semi-circular instrument dial (0-100 sweeping left-to-right) for the fit score."""
+    cx, cy, r = 60, 56, 46
+    theta = math.radians(180 - 1.8 * pct)
+    end_x, end_y = cx + r * math.cos(theta), cy - r * math.sin(theta)
+    nx, ny = cx + 37 * math.cos(theta), cy - 37 * math.sin(theta)
+
+    ticks = ""
+    for t in (0, 25, 50, 75, 100):
+        a = math.radians(180 - 1.8 * t)
+        x1, y1 = cx + 46 * math.cos(a), cy - 46 * math.sin(a)
+        x2, y2 = cx + 38 * math.cos(a), cy - 38 * math.sin(a)
+        ticks += f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="#B8BBB3" stroke-width="2"/>'
+
     return (
-        f'<svg width="52" height="52" viewBox="0 0 52 52" style="flex-shrink:0">'
-        f'<circle cx="26" cy="26" r="{r}" fill="none" stroke="#e2e8f0" stroke-width="5"/>'
-        f'<circle cx="26" cy="26" r="{r}" fill="none" stroke="{color}" stroke-width="5"'
-        f' stroke-dasharray="{dash:.1f} {circ:.1f}"'
-        f' stroke-linecap="round" transform="rotate(-90 26 26)"/>'
-        f'<text x="26" y="30" text-anchor="middle" font-size="11" font-weight="600"'
-        f' font-family="sans-serif" fill="{color}">{pct}%</text>'
+        f'<svg width="108" height="58" viewBox="0 0 120 62" style="flex-shrink:0">'
+        f'<path d="M {cx-r},{cy} A {r},{r} 0 0,1 {cx+r},{cy}" fill="none" stroke="#DCDDD5" stroke-width="8" stroke-linecap="round"/>'
+        f'<path d="M {cx-r},{cy} A {r},{r} 0 0,1 {end_x:.1f},{end_y:.1f}" fill="none" stroke="{color}" stroke-width="8" stroke-linecap="round"/>'
+        f'{ticks}'
+        f'<line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="#1C1F1B" stroke-width="2.4" stroke-linecap="round"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="4.5" fill="#1C1F1B"/>'
         f'</svg>'
     )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CANDIDATE CARD  (rich HTML)
 # ══════════════════════════════════════════════════════════════════════════════
-
-QUALITY_STYLE = {
-    "strong":  ("background:#dcfce7;color:#166534", "Strong match"),
-    "good":    ("background:#fef9c3;color:#92400e", "Good match"),
-    "partial": ("background:#dbeafe;color:#1e40af", "Partial match"),
-}
 
 def _candidate_card(rank: int, r: dict) -> str:
     m        = r["metadata"]
@@ -129,26 +137,20 @@ def _candidate_card(rank: int, r: dict) -> str:
     hits     = r.get("keyword_hits", 0)
     sections = list(dict.fromkeys(r.get("sections_found", [])))[:5]
 
-    q_style, q_label = QUALITY_STYLE.get(quality, QUALITY_STYLE["partial"])
+    color, q_label = QUALITY_STYLE.get(quality, QUALITY_STYLE["partial"])
+    gauge = _gauge_svg(fit_pct, color)
 
-    ring       = _fit_ring(fit_pct, quality)
-    email_link = (f'<a href="mailto:{email}" style="color:#3b82f6;text-decoration:none">'
-                  f'{email}</a>') if email else "—"
-    li_link    = (f'<a href="https://{linkedin}" target="_blank" '
-                  f'style="color:#0077b5;text-decoration:none">LinkedIn ↗</a>') if linkedin else "—"
+    email_link = (f'<a href="mailto:{email}">{email}</a>') if email else "—"
+    li_link    = (f'<a href="https://{linkedin}" target="_blank">LinkedIn ↗</a>') if linkedin else "—"
 
     section_pills = "".join(
-        f'<span style="background:#f1f5f9;color:#475569;padding:2px 9px;'
-        f'border-radius:12px;font-size:11px;margin-right:4px;white-space:nowrap">{s}</span>'
-        for s in sections if s
+        f'<span class="chip chip-outline">{s}</span>' for s in sections if s
     )
     badges = ""
     if years:
-        badges += (f'<span style="background:#f0fdf4;color:#166534;padding:2px 9px;'
-                   f'border-radius:12px;font-size:11px;margin-right:4px">{years}y exp</span>')
+        badges += f'<span class="chip chip-filled">{years}y exp</span>'
     if hits:
-        badges += (f'<span style="background:#eff6ff;color:#1d4ed8;padding:2px 9px;'
-                   f'border-radius:12px;font-size:11px">{hits} keyword hits</span>')
+        badges += f'<span class="chip chip-filled">{hits} keyword hits</span>'
 
     preview = (
         " · ".join(r.get("all_chunks", [r["text"]]))[:480]
@@ -158,67 +160,51 @@ def _candidate_card(rank: int, r: dict) -> str:
     )
 
     return f"""
-<div style="border:1px solid #e2e8f0;border-radius:14px;padding:18px 20px;
-            margin-bottom:14px;background:#ffffff;font-family:system-ui,sans-serif;
-            box-shadow:0 1px 4px rgba(0,0,0,.05)">
+<div class="frame-card">
+  <div class="corner-bl"></div><div class="corner-br"></div>
 
   <!-- Header row -->
-  <div style="display:flex;align-items:center;gap:14px">
-    <!-- Rank badge -->
-    <div style="width:38px;height:38px;border-radius:50%;background:#6366f1;
-                display:flex;align-items:center;justify-content:center;
-                color:#fff;font-weight:700;font-size:15px;flex-shrink:0">
-      {rank}
-    </div>
-
-    <!-- Name + file -->
+  <div class="frame-head">
     <div style="flex:1;min-width:0">
-      <div style="font-size:16px;font-weight:600;color:#0f172a;
-                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name}</div>
-      <div style="font-size:12px;color:#94a3b8;margin-top:2px">{file_nm}</div>
+      <span class="frame-index">FR.{rank:02d}</span>
+      <div class="frame-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name}</div>
+      <div class="frame-file">{file_nm}</div>
     </div>
 
-    <!-- Fit ring -->
-    <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
-      {ring}
-      <span style="font-size:10px;color:#94a3b8">fit score</span>
+    <!-- Fit gauge -->
+    <div class="gauge-col">
+      {gauge}
+      <div class="gauge-pct" style="color:{color}">{fit_pct}%</div>
+      <div class="gauge-label">fit score</div>
+      <div class="quality-tag" style="color:{color}">
+        <span class="quality-dot" style="background:{color}"></span>{q_label}
+      </div>
     </div>
-
-    <!-- Quality badge -->
-    <span style="{q_style};padding:4px 12px;border-radius:20px;
-                 font-size:12px;font-weight:600;white-space:nowrap;flex-shrink:0">
-      {q_label}
-    </span>
   </div>
 
   <!-- Contact row -->
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;
-              margin-top:14px;padding-top:12px;border-top:1px solid #f1f5f9">
+  <div class="contact-grid">
     <div>
-      <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;
-                  letter-spacing:.4px;margin-bottom:3px">Email</div>
-      <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis">{email_link}</div>
+      <div class="contact-label">Email</div>
+      <div class="contact-value" style="overflow:hidden;text-overflow:ellipsis">{email_link}</div>
     </div>
     <div>
-      <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;
-                  letter-spacing:.4px;margin-bottom:3px">Phone</div>
-      <div style="font-size:13px;color:#0f172a">{phone or "—"}</div>
+      <div class="contact-label">Phone</div>
+      <div class="contact-value">{phone or "—"}</div>
     </div>
     <div>
-      <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;
-                  letter-spacing:.4px;margin-bottom:3px">LinkedIn</div>
-      <div style="font-size:13px">{li_link}</div>
+      <div class="contact-label">LinkedIn</div>
+      <div class="contact-value">{li_link}</div>
     </div>
   </div>
 
   <!-- Badges + sections -->
-  <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:4px">
+  <div style="margin-top:4px">
     {badges}{section_pills}
   </div>
 
   <!-- Preview -->
-  <div style="margin-top:12px;padding:10px 14px;background:#f8fafc;border-radius:8px;
-              font-size:12px;color:#64748b;line-height:1.65">
+  <div class="scan-log">
     {preview}
   </div>
 </div>
@@ -233,8 +219,7 @@ def cb_search(query: str, section: str, top_k: int, use_reranker: bool, min_fit_
     query = query.strip()
     if not query:
         return (
-            "<div style='text-align:center;padding:40px;color:#94a3b8;font-family:sans-serif'>"
-            "Enter a search query above to find candidates.</div>",
+            "<div class='empty-state'>Enter a search query above to find candidates.</div>",
             "",
         )
 
@@ -252,13 +237,11 @@ def cb_search(query: str, section: str, top_k: int, use_reranker: bool, min_fit_
     rewrite_note = ""
     if rq.rewritten:
         pills = "".join(
-            f"<span style='background:#f1f5f9;color:#475569;padding:2px 8px;"
-            f"border-radius:10px;font-size:11px;margin-right:4px'>{s}</span>"
+            f"<span class='chip chip-outline'>{s}</span>"
             for s in rq.must_have_skills
         )
         rewrite_note = (
-            f"<div style='font-size:12px;color:#64748b;margin-bottom:12px;"
-            f"padding:8px 12px;background:#f8fafc;border-radius:8px'>"
+            f"<div class='rewrite-note'>"
             f"<b>Searched:</b> {rq.primary}"
             + (f"<br><b>Must-have skills:</b> {pills}" if pills else "")
             + (f"<br><b>Min experience:</b> {rq.min_years_exp} years" if rq.min_years_exp else "")
@@ -268,15 +251,14 @@ def cb_search(query: str, section: str, top_k: int, use_reranker: bool, min_fit_
     if not results:
         return (
             rewrite_note +
-            "<div style='text-align:center;padding:40px;color:#94a3b8;font-family:sans-serif'>"
-            f"No candidates found above {int(min_fit_pct)}% fit.</div>",
+            f"<div class='empty-state'>No candidates found above {int(min_fit_pct)}% fit.</div>",
             "",
         )
 
     cards   = "".join(_candidate_card(i + 1, r) for i, r in enumerate(results))
     top_fit = results[0].get("fit_pct", 0)
     status  = (
-        f"<span style='color:#166534;font-weight:500'>"
+        f"<span class='status-line'>"
         f"Found <strong>{len(results)}</strong> candidate(s) for "
         f"<em>\"{query}\"</em> — top fit: <strong>{top_fit}%</strong>"
         + (" · <em>query expanded by Groq</em>" if rq.rewritten else "")
@@ -344,27 +326,177 @@ Best regards,
 The HR Team"""
 
 # ══════════════════════════════════════════════════════════════════════════════
+# THEME  — "light table" identity: warm instrument-panel neutrals + signal green
+# ══════════════════════════════════════════════════════════════════════════════
+
+THEME = gr.themes.Default(
+    font=[gr.themes.GoogleFont("Space Grotesk"), "ui-sans-serif", "system-ui"],
+    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "ui-monospace"],
+).set(
+    body_background_fill="#EDEEEA",
+    body_background_fill_dark="#EDEEEA",
+    body_text_color="#1C1F1B",
+    body_text_color_dark="#1C1F1B",
+    block_background_fill="#F7F7F4",
+    block_background_fill_dark="#F7F7F4",
+    block_border_color="#1C1F1B",
+    block_border_color_dark="#1C1F1B",
+    block_label_text_color="#5C6259",
+    block_label_text_color_dark="#5C6259",
+    input_background_fill="#FFFFFF",
+    input_background_fill_dark="#FFFFFF",
+    input_border_color="#D9DAD3",
+    input_border_color_dark="#D9DAD3",
+    border_color_primary="#1C1F1B",
+    border_color_primary_dark="#1C1F1B",
+    color_accent="#2F6F4E",
+    color_accent_soft="#E3EFE7",
+    color_accent_soft_dark="#E3EFE7",
+    slider_color="#2F6F4E",
+    slider_color_dark="#2F6F4E",
+    checkbox_background_color_selected="#2F6F4E",
+    checkbox_background_color_selected_dark="#2F6F4E",
+    checkbox_border_color_selected="#2F6F4E",
+    checkbox_border_color_selected_dark="#2F6F4E",
+    button_primary_background_fill="#C2410C",
+    button_primary_background_fill_hover="#9A330A",
+    button_primary_background_fill_dark="#C2410C",
+    button_primary_text_color="#FFFFFF",
+    button_primary_text_color_dark="#FFFFFF",
+    button_secondary_background_fill="#1C1F1B",
+    button_secondary_background_fill_dark="#1C1F1B",
+    button_secondary_text_color="#FFFFFF",
+    button_secondary_text_color_dark="#FFFFFF",
+    button_cancel_background_fill="#9A1F1F",
+    button_cancel_background_fill_dark="#9A1F1F",
+    button_cancel_text_color="#FFFFFF",
+    button_cancel_text_color_dark="#FFFFFF",
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CSS
 # ══════════════════════════════════════════════════════════════════════════════
 
 CSS = """
-#title    { text-align:center; margin-bottom:.2em; }
-#subtitle { text-align:center; color:#64748b; font-size:.93em; margin-bottom:1.4em; }
-.log-box  textarea { font-family:monospace; font-size:.82em; }
-#results-html { max-height:720px; overflow-y:auto; padding-right:4px; }
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+  --canvas:#EDEEEA; --panel-2:#FFFFFF;
+  --ink:#1C1F1B; --ink-soft:#5C6259; --line:#D9DAD3;
+  --signal:#2F6F4E; --signal-soft:#E3EFE7;
+  --caution:#9A6B12; --caution-soft:#F3E9D2;
+  --mute:#6B7177; --mute-soft:#E7E8E5;
+  --spotlight:#C2410C;
+}
+
+.gradio-container { font-family:'Inter',ui-sans-serif,system-ui !important; }
+.prose h1, .prose h2, .prose h3 { font-family:'Space Grotesk',sans-serif !important; }
+
+/* ── Header strip ───────────────────────────────────────────────────────── */
+#header-strip {
+  background:var(--ink); color:#F4F4F0; border-radius:14px;
+  padding:22px 28px 20px; margin-bottom:4px; position:relative; overflow:hidden;
+}
+#header-strip::before, #header-strip::after {
+  content:""; position:absolute; left:0; right:0; height:7px;
+  background-image:repeating-linear-gradient(90deg, rgba(244,244,240,.35) 0 5px, transparent 5px 13px);
+}
+#header-strip::before { top:0; }
+#header-strip::after  { bottom:0; }
+#eyebrow     { font-family:'JetBrains Mono',monospace; font-size:.72em; letter-spacing:.14em;
+               text-transform:uppercase; color:#A9AFA4; margin:0 0 6px; }
+#title-text  { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:1.7em; margin:0; }
+#subtitle-text { font-family:'Inter',sans-serif; font-size:.93em; color:#C7CBC2; margin:8px 0 0; max-width:680px; }
+
+/* ── Tabs styled as an instrument panel ─────────────────────────────────── */
+.tabs > .tab-nav button, button[role="tab"] {
+  font-family:'JetBrains Mono',monospace !important; font-size:.78em !important;
+  letter-spacing:.05em; text-transform:uppercase;
+}
+.tabs > .tab-nav button.selected, button[role="tab"][aria-selected="true"] {
+  color:var(--signal) !important; border-color:var(--signal) !important;
+}
+
+.log-box textarea { font-family:'JetBrains Mono',monospace !important; font-size:.82em; }
+#results-html { max-height:760px; overflow-y:auto; padding-right:6px; }
+
+/* ── Status line / rewrite note / empty states ──────────────────────────── */
+.status-line  { font-family:'JetBrains Mono',monospace; font-size:.85em; color:var(--signal); font-weight:600; }
+.rewrite-note { font-size:12px; color:var(--ink-soft); margin-bottom:12px; padding:8px 12px;
+                background:var(--mute-soft); border-radius:8px; }
+.empty-state  { text-align:center; padding:40px; color:var(--ink-soft); font-family:'Inter',sans-serif; }
+
+/* ── Candidate frame card ───────────────────────────────────────────────── */
+.frame-card {
+  position:relative; background:var(--panel-2); border:1px solid var(--line);
+  border-radius:6px; padding:18px 20px 16px; margin:0 8px 20px;
+}
+.frame-card::before, .frame-card::after, .frame-card .corner-bl, .frame-card .corner-br {
+  content:""; position:absolute; width:13px; height:13px; border:2px solid var(--ink); opacity:.85;
+}
+.frame-card::before    { top:-6px; left:-6px;  border-right:none; border-bottom:none; }
+.frame-card::after     { top:-6px; right:-6px; border-left:none;  border-bottom:none; }
+.frame-card .corner-bl { bottom:-6px; left:-6px;  border-right:none; border-top:none; }
+.frame-card .corner-br { bottom:-6px; right:-6px; border-left:none;  border-top:none; }
+
+.frame-head  { display:flex; align-items:flex-start; gap:14px; }
+.frame-index { font-family:'JetBrains Mono',monospace; font-size:.72em; color:var(--mute);
+               letter-spacing:.06em; display:block; margin-bottom:2px; }
+.frame-name  { font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:1.08em; color:var(--ink); }
+.frame-file  { font-family:'JetBrains Mono',monospace; font-size:.72em; color:var(--ink-soft); margin-top:2px; }
+
+.gauge-col   { display:flex; flex-direction:column; align-items:center; margin-left:auto; flex-shrink:0; }
+.gauge-pct   { font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1.3em; margin-top:-14px; }
+.gauge-label { font-family:'JetBrains Mono',monospace; font-size:.62em; letter-spacing:.12em;
+               color:var(--mute); text-transform:uppercase; margin-top:1px; }
+
+.quality-tag { font-family:'JetBrains Mono',monospace; font-size:.7em; letter-spacing:.1em;
+               text-transform:uppercase; font-weight:700; display:flex; align-items:center; gap:6px; margin-top:6px; }
+.quality-dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+
+.contact-grid  { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:14px;
+                  padding-top:12px; border-top:1px solid var(--line); }
+.contact-label { font-family:'JetBrains Mono',monospace; font-size:.65em; letter-spacing:.08em;
+                  text-transform:uppercase; color:var(--mute); margin-bottom:3px; }
+.contact-value { font-size:.86em; color:var(--ink); }
+.contact-value a { color:var(--signal); text-decoration:none; }
+
+.chip { font-family:'JetBrains Mono',monospace; font-size:.68em; letter-spacing:.02em; padding:2px 8px;
+        border-radius:3px; margin-right:5px; display:inline-block; margin-top:6px; }
+.chip-outline { border:1px solid var(--line); color:var(--ink-soft); background:transparent; }
+.chip-filled  { background:var(--signal-soft); color:var(--signal); font-weight:600; }
+
+.scan-log {
+  margin-top:12px; padding:10px 14px; background:var(--canvas); border-left:3px solid var(--ink);
+  font-family:'JetBrains Mono',monospace; font-size:.74em; color:var(--ink-soft); line-height:1.6;
+  border-radius:0 6px 6px 0;
+}
+
+/* ── Agent chat tab ─────────────────────────────────────────────────────── */
+#agent-chatbot { border:1px solid var(--line) !important; border-radius:8px !important; }
+.chat-input-row textarea { font-family:'Inter',sans-serif !important; }
+.agent-thinking { font-family:'JetBrains Mono',monospace; font-size:.82em; color:var(--mute);
+                  padding:10px 0; animation: blink 1s step-end infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.chat-tip { font-family:'JetBrains Mono',monospace; font-size:.75em; color:var(--mute);
+            padding:6px 12px; border:1px solid var(--line); border-radius:4px;
+            cursor:pointer; display:inline-block; margin:4px 4px 0 0; }
+.chat-tip:hover { border-color:var(--signal); color:var(--signal); }
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 
-with gr.Blocks(title="HR Assistant — CV RAG", css=CSS) as demo:
+with gr.Blocks(title="HR Assistant — CV RAG") as demo:
 
-    gr.Markdown("# HR Assistant — CV Search", elem_id="title")
-    gr.Markdown(
-        "Index your CV dataset once. Search with natural language. "
-        "Each result shows a **fit percentage**, match quality, years of experience, and contact info.",
-        elem_id="subtitle",
+    gr.HTML(
+        "<div id='header-strip'>"
+        "<div id='eyebrow'>AI-powered candidate retrieval</div>"
+        "<div id='title-text'>HR Assistant — CV Search</div>"
+        "<div id='subtitle-text'>Index your CV dataset once. Search with natural language. "
+        "Each result shows a fit score, match quality, years of experience, and contact info.</div>"
+        "</div>"
     )
 
     with gr.Tabs():
@@ -396,7 +528,7 @@ with gr.Blocks(title="HR Assistant — CV RAG", css=CSS) as demo:
             search_btn    = gr.Button("Search", variant="primary", size="lg")
             search_status = gr.HTML("")
             results_html  = gr.HTML(
-                "<div style='text-align:center;padding:48px;color:#94a3b8;font-family:sans-serif'>"
+                "<div class='empty-state'>"
                 "Your search results will appear here.</div>",
                 elem_id="results-html",
             )
@@ -412,7 +544,128 @@ with gr.Blocks(title="HR Assistant — CV RAG", css=CSS) as demo:
                 outputs=[results_html, search_status],
             )
 
-        # ── Tab 2: Upload & Ingest ────────────────────────────────────────────
+        # ── Tab 2: AI Assistant (Agent 1) ─────────────────────────────────────
+        with gr.Tab("🤖 AI Assistant"):
+
+            gr.HTML(
+                "<div style='font-family:JetBrains Mono,monospace;font-size:.75em;"
+                "color:#5C6259;padding:8px 0 4px;letter-spacing:.04em'>"
+                "AGENT 1 — JOB DESCRIPTION ANALYZER &amp; SEARCH</div>"
+                "<p style='font-size:.92em;color:#1C1F1B;margin:0 0 14px'>"
+                "Chat naturally. Describe the role you're hiring for and the agent "
+                "will extract requirements, search the CV database, and return "
+                "matching candidates directly in this window."
+                "</p>"
+            )
+
+            # Quick-start example prompts
+            gr.HTML(
+                "<div style='margin-bottom:14px'>"
+                "<span style='font-family:monospace;font-size:.72em;color:#6B7177;"
+                "letter-spacing:.06em;text-transform:uppercase'>Try asking:</span><br>"
+                "<span class='chat-tip' onclick=\"document.querySelector('#chat-input textarea').value="
+                "'I need a senior Python developer with FastAPI and PostgreSQL, 3+ years experience';"
+                "document.querySelector('#chat-input textarea').dispatchEvent(new Event('input'))\">"
+                "Senior Python dev, FastAPI, 3+ years</span>"
+                "<span class='chat-tip' onclick=\"document.querySelector('#chat-input textarea').value="
+                "'Find me AI/ML engineers with NLP or LLM experience';"
+                "document.querySelector('#chat-input textarea').dispatchEvent(new Event('input'))\">"
+                "AI/ML engineer with LLM experience</span>"
+                "<span class='chat-tip' onclick=\"document.querySelector('#chat-input textarea').value="
+                "'Junior data analyst with Excel and Power BI, fresh graduate is fine';"
+                "document.querySelector('#chat-input textarea').dispatchEvent(new Event('input'))\">"
+                "Junior data analyst, fresh grad OK</span>"
+                "</div>"
+            )
+
+            chatbot = gr.Chatbot(
+                value=[],
+                render_markdown=True,
+                sanitize_html=False,
+                height=620,
+                elem_id="agent-chatbot",
+                label="",
+                show_label=False,
+            )
+
+            with gr.Row(elem_classes=["chat-input-row"]):
+                chat_input = gr.Textbox(
+                    placeholder=(
+                        "E.g. 'I need a senior Python dev with FastAPI, 3+ years, based in Cairo'"
+                    ),
+                    show_label=False,
+                    scale=8,
+                    elem_id="chat-input",
+                    lines=1,
+                    max_lines=4,
+                )
+                send_btn = gr.Button("Send ↵", variant="primary", scale=1, min_width=80)
+
+            with gr.Row():
+                clear_btn = gr.Button(
+                    "Clear conversation", variant="secondary", size="sm", scale=1
+                )
+                gr.HTML(
+                    "<div style='font-family:monospace;font-size:.72em;color:#6B7177;"
+                    "padding:6px 0;flex:4'>Powered by Groq LLaMA 3.3-70b · "
+                    "Results pulled from your indexed CV database</div>"
+                )
+
+            # State: Groq-format history (plain text, no HTML)
+            llm_hist = gr.State([])
+
+            def _search_adapter(query: str, top_k: int, min_fit_pct: int):
+                """Thin wrapper so agent1 doesn't need to know about section_filter / reranker."""
+                return smart_search(
+                    query,
+                    top_k=top_k,
+                    section_filter=None,
+                    use_reranker=True,
+                    min_fit_pct=min_fit_pct,
+                )
+
+            def on_send(user_msg: str, history: list, llm_history: list):
+                if not user_msg.strip():
+                    yield history, llm_history, ""
+                    return
+
+                # Gradio 6.x Chatbot uses messages dict format:
+                # [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+                history = history + [
+                    {"role": "user",      "content": user_msg},
+                    {"role": "assistant", "content":
+                        "<span style='font-family:monospace;font-size:.82em;color:#6B7177'>"
+                        "⏳ Analyzing requirements and searching candidates…</span>"},
+                ]
+                yield history, llm_history, ""
+
+                # Run the agent (blocking LLM + search)
+                reply_html, updated_llm_history = run_agent_turn(
+                    user_message=user_msg,
+                    llm_history=llm_history,
+                    search_fn=_search_adapter,
+                )
+
+                # Dicts are mutable — update in place
+                history[-1]["content"] = reply_html
+                yield history, updated_llm_history, ""
+
+            send_btn.click(
+                on_send,
+                inputs=[chat_input, chatbot, llm_hist],
+                outputs=[chatbot, llm_hist, chat_input],
+            )
+            chat_input.submit(
+                on_send,
+                inputs=[chat_input, chatbot, llm_hist],
+                outputs=[chatbot, llm_hist, chat_input],
+            )
+            clear_btn.click(
+                lambda: ([], [], ""),
+                outputs=[chatbot, llm_hist, chat_input],
+            )
+
+        # ── Tab 3: Upload & Ingest ────────────────────────────────────────────
         with gr.Tab("📁 Upload & Ingest"):
             gr.Markdown(
                 "**Run the dataset once** — already-indexed files are automatically skipped "
@@ -560,4 +813,5 @@ The final percentage is mapped through a sigmoid function so scores spread natur
 """)
 
 if __name__ == "__main__":
-    demo.launch(server_name="localhost", server_port=7860, share=False)
+    demo.launch(server_name="localhost", server_port=7860, share=False,
+                theme=THEME, css=CSS)
