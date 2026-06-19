@@ -1,108 +1,6 @@
-# DEPI_Grad_Project
-data used https://drive.google.com/drive/folders/1Y6DXboh3euFfdYmJRBwUQJJpcXz0MAQ2?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto
+# HR Assistant — AI-Powered CV Search & Recruitment System
 
-DEPI GenAI CV Search Engine
-
-An AI pipeline for processing resumes, extracting structured information, and enabling semantic search using embeddings.
-
-Features
-Dataset loading from Kaggle
-Text extraction from PDFs using PyMuPDF
-OCR fallback for scanned documents using Tesseract
-Image text extraction support
-Resume section-based chunking (skills, experience, education, projects)
-Semantic embeddings using Sentence Transformers
-Cosine similarity search over CV chunks
-Embedding persistence using JSON storage
-Interactive search interface
-Pipeline
-Dataset → Text Extraction → Chunking → Embedding Generation → Semantic Search
-Installation
-
-1. Install dependencies
-pip install pytesseract pillow pymupdf sentence-transformers kagglehub numpy
-2. Install Tesseract OCR (Required for scanned PDFs)
-
-Download from:
-
-https://github.com/UB-Mannheim/tesseract/wiki
-
-During installation:
-
-Enable “Add to PATH”
-Install English language pack
-4. Verify installation
-tesseract --version
-5. Configure Tesseract path in code
-
-If not automatically detected:
-
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-Usage
-Run with Kaggle dataset
-python pipeline.py --kaggle --rebuild
-Run with local dataset
-python pipeline.py --dataset <folder_path> --rebuild
-Interactive search
-
-After processing(for now), use:
-
-Search > python machine learning
-Output
-
-Processed embeddings are stored in:
-
-cv_embeddings.json
-
-Each entry contains:
-
-file name
-section type
-extracted text
-embedding vector
-Troubleshooting
-Tesseract not found
-
-Ensure:
-
-Tesseract is installed
-It is added to system PATH
-Or manually set path in code
-Empty embeddings file
-
-Possible causes:
-
-OCR failure
-Missing Tesseract installation
-PDFs are image-based and not processed correctly
-
-Fix:
-
-python pipeline.py --kaggle --rebuild
-No search results
-
-Ensure embeddings exist and are not empty. If needed, rebuild dataset.
-
-Tech Stack
-Python
-PyMuPDF
-Tesseract OCR
-SentenceTransformers (MiniLM)
-NumPy
-KaggleHub
-Future Improvements
-
-Candidate ranking system based on job descriptions
-Vector database integration (FAISS or ChromaDB)
-Resume scoring model
-
-Use Cases
-
-
-----------------------------------------------------
-# HR Assistant — CV RAG Search System
-
-A fully local, offline-capable system for indexing large CV datasets and searching them with natural language. Built on semantic vector search, BM25 keyword retrieval, and a CrossEncoder reranker. No cloud services required.
+A multi-agent recruitment assistant built on a hybrid RAG pipeline. HR teams can index CV datasets, search with natural language, get AI-reasoned candidate recommendations, and send personalized emails — all from a single web app.
 
 ---
 
@@ -111,81 +9,80 @@ A fully local, offline-capable system for indexing large CV datasets and searchi
 1. [What This System Does](#1-what-this-system-does)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Project Structure](#3-project-structure)
-4. [Installation](#4-installation)
-5. [Running the Pipeline (Ingestion)](#5-running-the-pipeline-ingestion)
-6. [Running the Web App (Search)](#6-running-the-web-app-search)
-7. [Pipeline Code — Detailed Walkthrough](#7-pipeline-code--detailed-walkthrough)
-   - [7.1 Configuration](#71-configuration)
-   - [7.2 The Skip-List (Never Start Over)](#72-the-skip-list-never-start-over)
-   - [7.3 Embedding Model](#73-embedding-model-singleton)
-   - [7.4 Text Extraction](#74-text-extraction--the-ocr-fix)
-   - [7.5 Contact Extraction](#75-contact-extraction)
-   - [7.6 Section-Aware Chunking](#76-section-aware-chunking)
-   - [7.7 ChromaDB — Vector Store](#77-chromadb--the-vector-store)
-   - [7.8 BM25 — Keyword Index](#78-bm25--the-keyword-index)
-   - [7.9 The Search Pipeline](#79-the-search-pipeline)
-   - [7.10 Fit Percentage](#710-fit-percentage)
-8. [How the Two-Phase Design Works](#8-how-the-two-phase-design-works)
+4. [Agent Breakdown](#4-agent-breakdown)
+5. [Installation](#5-installation)
+6. [Running the Pipeline (Ingestion)](#6-running-the-pipeline-ingestion)
+7. [Running the Web App](#7-running-the-web-app)
+8. [Pipeline Deep Dive](#8-pipeline-deep-dive)
 9. [Search Quality Explained](#9-search-quality-explained)
-10. [Tuning & Configuration Reference](#10-tuning--configuration-reference)
-11. [Next Steps for the Team](#11-next-steps-for-the-team)
-12. [Troubleshooting](#12-troubleshooting)
+10. [Configuration Reference](#10-configuration-reference)
+11. [Team — Who Owns What](#11-team--who-owns-what)
+12. [Next Steps for the Team](#12-next-steps-for-the-team)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
 ## 1. What This System Does
 
-This system lets an HR team index an entire dataset of CV/resume PDFs once, then search through all of them instantly using plain English queries like:
+This system lets an HR team:
+
+1. **Index** a folder of CV/resume PDFs once (runs offline, takes 30–90 min for 2,000 CVs)
+2. **Search** the full dataset instantly using plain English
+3. **Get AI-reasoned results** — the agent explains *why* each candidate was selected, citing specific evidence from their CV
+4. **Chat conversationally** — refine searches through follow-up messages ("make it more senior", "add React too", "only Cairo-based")
+5. **Email candidates** directly from the results
+
+Example queries that work:
 
 > *"Senior Python developer with Django and PostgreSQL, 5 years experience"*
 > *"Junior data analyst proficient in Excel and Power BI, Cairo-based"*
 > *"Machine learning engineer with NLP and TensorFlow background"*
 
-Each result shows:
-- A **fit percentage** (0–100%) representing how well the candidate matches the query
-- A **match quality badge** (Strong / Good / Partial)
-- Extracted contact info: name, email, phone, LinkedIn
-- Which CV sections matched and how many query keywords were found
-- A text preview from the most relevant parts of their CV
-
-The system runs entirely on your local machine. No API keys, no internet connection required after setup.
+Each result shows a **fit percentage** (0–100%), a **match quality badge** (Strong / Good / Partial), contact info, matched CV sections, and a text preview.
 
 ---
 
 ## 2. Architecture Overview
 
-The system is split into two phases that are completely independent of each other.
+The system has two independent phases and one conversational agent layer on top.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 1 — OFFLINE INGESTION  (run once, takes 30–90 min)       │
+┌──────────────────────────────────────────────────────────────────┐
+│  PHASE 1 — OFFLINE INGESTION  (run once)                         │
 │                                                                  │
-│  PDF files  →  Text extraction  →  Chunking  →  Embedding       │
-│                    ↓                   ↓            ↓            │
-│              (PyMuPDF first,    (section-aware)  (BGE-small)    │
-│               OCR fallback)                                      │
-│                                                    ↓            │
-│                                         ┌──────────┴─────────┐  │
-│                                         │   ChromaDB (disk)  │  │
-│                                         │   BM25 index (.pkl)│  │
-│                                         │   indexed_files.txt│  │
-│                                         └────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+│  PDF files → Text extraction → Chunking → Embedding             │
+│               (PyMuPDF +        (section-   (BGE-small)         │
+│                Tesseract OCR)    aware)                          │
+│                                              ↓                  │
+│                                   ┌──────────┴──────────┐       │
+│                                   │  ChromaDB (vector)  │       │
+│                                   │  BM25 index (.pkl)  │       │
+│                                   │  indexed_files.txt  │       │
+│                                   └─────────────────────┘       │
+└──────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 2 — ONLINE SEARCH  (Gradio app, always fast)            │
+┌──────────────────────────────────────────────────────────────────┐
+│  PHASE 2 — ONLINE SEARCH  (always fast, < 1.5s)                 │
 │                                                                  │
-│  Query  →  Embed query  →  ChromaDB dense retrieval             │
-│                        →  BM25 sparse retrieval                 │
-│                        →  RRF fusion                            │
-│                        →  Deduplicate per candidate             │
-│                        →  CrossEncoder reranker                 │
-│                        →  Fit percentage calculation            │
-│                        →  Result cards in UI                    │
-└─────────────────────────────────────────────────────────────────┘
+│  Query → Embed → ChromaDB dense retrieval                        │
+│               → BM25 sparse retrieval                           │
+│               → RRF fusion                                       │
+│               → Deduplicate per candidate                        │
+│               → CrossEncoder reranker                            │
+│               → Fit percentage → Result cards                    │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│  AGENT LAYER — on top of Phase 2                                 │
+│                                                                  │
+│  HR message                                                      │
+│     → Groq LLaMA 3.3-70b (turn 1 — decides to search or ask)   │
+│     → search_candidates tool → smart_search() → Phase 2         │
+│     → Groq LLaMA 3.3-70b (turn 2 — writes summary + reasoning) │
+│     → HTML reply with candidate cards                            │
+│     → Updated conversation history (for follow-up turns)        │
+└──────────────────────────────────────────────────────────────────┘
 ```
-
-**The key design principle:** Phase 1 runs once. Phase 2 runs on every search. The web app (`app.py`) only ever does Phase 2 — it never re-reads or re-processes any PDF.
 
 ---
 
@@ -194,72 +91,146 @@ The system is split into two phases that are completely independent of each othe
 ```
 project/
 │
-├── pipeline.py          # All ingestion + search logic
-├── app.py               # Gradio web UI
+├── pipeline.py           # Ingestion + hybrid search core
+├── query_rewriter.py     # Groq-powered query expansion (smart_search)
+├── RetriveCVAgent.py     # Agent 1 — conversational search + card rendering
+├── app.py                # Gradio web UI (4 tabs)
 │
-├── chroma_db/           # Vector database (created automatically)
-├── bm25_index.pkl       # BM25 keyword index (created automatically)
-├── indexed_files.txt    # Fast skip-list of processed filenames
-├── uploads/             # Folder for individually uploaded CVs
+├── chroma_db/            # Vector database (auto-created)
+├── bm25_index.pkl        # BM25 keyword index (auto-created)
+├── indexed_files.txt     # Fast skip-list of processed CVs
+├── uploads/              # Temp folder for individually uploaded PDFs
 │
-└── README.md            # This file
+└── README.md
 ```
 
 ---
 
-## 4. Installation
+## 4. Agent Breakdown
+
+### ✅ Agent 1 — Conversational Search (done: `RetriveCVAgent.py`)
+
+Converts natural HR dialogue into structured candidate searches. Handles multi-turn conversation so HR can refine results without repeating context.
+
+**Flow (one turn):**
+
+```
+HR message
+  → Groq LLaMA 3.3-70b with search_candidates tool
+  → If tool called  → execute smart_search() → render CV cards
+  → If no tool call → ask one clarifying question
+  → Returns (reply_html, updated_llm_history)
+```
+
+**Key behaviors:**
+- Calls `search_candidates` immediately when there's enough to go on — never over-asks
+- Handles follow-up refinements: "more senior", "add React", "only Cairo-based"
+- Builds a rich query string: role + skills + seniority + location
+- Returns an HTML summary + styled candidate cards with SVG fit gauge
+
+**Renders each candidate with:**
+- Semi-circular fit score dial (green = strong, amber = good, gray = partial)
+- Name, email, phone, LinkedIn
+- Years of experience + keyword hits badges
+- Section chips (skills, experience, education…)
+- Text preview from the most relevant CV chunks
+
+**Used by `app.py`:**
+```python
+from RetriveCVAgent import run_agent_turn
+
+reply_html, new_history = run_agent_turn(user_msg, llm_history, search_fn)
+```
+
+---
+
+### 🔲 Agent 2 — Reasoning Agent (to be built)
+
+Explains *why* each candidate was selected, citing specific evidence from their CV sections.
+
+**Planned behavior:** After search results come back, this agent reads the candidate's actual CV text and the HR's query, then generates a structured justification like:
+
+> *"Selected because her experience section explicitly mentions 3 years of FastAPI in a production environment — matching your seniority requirement — and her projects section shows two deployed ML APIs. Skills section lists PostgreSQL and Docker, which you specified. Gap: no mention of React, which you listed as preferred."*
+
+This is explainable AI for recruitment. The reasoning is cited from the CV, not hallucinated.
+
+---
+
+### 🔲 Agent 3 — Email Agent (to be built)
+
+Drafts a personalized outreach email for a selected candidate, informed by the reasoning from Agent 2.
+
+**Planned behavior:** Reads the HR's requirements + the reasoning for why this specific candidate was chosen, then writes an email that references their actual background. Not a generic template — the email mentions specific skills or projects from their CV to make it feel personal.
+
+---
+
+### 🔲 Agent 4 — Candidate Gap Agent (to be built)
+
+Analyzes a candidate's CV against a job description and produces a specific, actionable gap report.
+
+**Planned behavior:** Compares the candidate's CV sections against the job requirements and outputs something like:
+
+> *"Your skills section lists Python but no frameworks. Roles like this require FastAPI or Django — a small GitHub project using either would close this gap. Your experience section doesn't mention system design or architecture; consider documenting a project where you made architectural decisions. Estimated time to address: 4–6 weeks."*
+
+Includes learning resources and a rough timeline per gap.
+
+---
+
+## 5. Installation
 
 ### Requirements
 
-- Python 3.10 or higher
+- Python 3.10+
 - ~2 GB disk space for models (downloaded automatically on first run)
-- Tesseract OCR (only needed for scanned/image-based PDFs)
+- Tesseract OCR (only needed for scanned/image-based PDFs — most CV datasets don't need it)
 
 ### Install Python dependencies
 
 ```bash
-pip install gradio sentence-transformers chromadb rank-bm25 pymupdf pillow
+pip install gradio sentence-transformers chromadb rank-bm25 pymupdf pillow groq
 ```
 
-### Install Tesseract (optional — for scanned PDFs only)
+### Set your Groq API key (free at https://console.groq.com)
 
-Most CV datasets use native-text PDFs and do not need Tesseract. Install it only if your dataset contains scanned documents.
+```bash
+# Windows
+set GROQ_API_KEY=gsk_...
+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  #this is the API i used 
+# Mac / Linux
+export GROQ_API_KEY=gsk_...
+```
 
-- **Windows:** Download from https://github.com/UB-Mannheim/tesseract/wiki
+The agent and query rewriter both use Groq (free tier). Search and ingestion work without it.
+
+### Install Tesseract (only for scanned PDFs)
+
+- **Windows:** https://github.com/UB-Mannheim/tesseract/wiki
 - **Linux:** `sudo apt install tesseract-ocr`
 - **macOS:** `brew install tesseract`
 
-After installing, update this line in `pipeline.py`:
-
-```python
-TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"  # Windows
-# or
-TESSERACT_CMD = "tesseract"  # Linux / macOS (if on PATH)
-```
+Then update `TESSERACT_CMD` in `pipeline.py` to your install path.
 
 ---
 
-## 5. Running the Pipeline (Ingestion)
+## 6. Running the Pipeline (Ingestion)
 
-Run the pipeline once on your CV dataset folder. It will index every PDF it finds, skip any it has already processed, and build the search database.
+Run once on your CV dataset. Already-indexed files are skipped automatically on every subsequent run.
 
 ```bash
 # Index a full folder
 python pipeline.py --dataset "D:/path/to/CVs"
 
-# Index only the first 100 files (useful for testing)
+# Test with a small batch first
 python pipeline.py --dataset "D:/path/to/CVs" --limit 100
 
-# Download and index the Kaggle resume dataset automatically
+# Download and index the Kaggle dataset automatically
 python pipeline.py --kaggle
 
-# Wipe everything and start fresh
+# Wipe everything and re-index from scratch
 python pipeline.py --dataset "D:/path/to/CVs" --rebuild
 ```
 
-### What happens during ingestion
-
-For each PDF, the pipeline prints a log line like:
+**What you'll see per file:**
 
 ```
 Processing: john_smith_cv.pdf
@@ -270,463 +241,202 @@ Processing: john_smith_cv.pdf
 ✅ john_smith_cv.pdf — 6 chunks [native]
 ```
 
-If `native chars` is a large number (> 30), OCR was skipped entirely. If it shows a small number, the PDF is scanned and Tesseract will run on it.
+If `native chars` is large (> 30), OCR was skipped — this is the fast path. Small numbers mean the PDF is scanned and Tesseract will run.
 
-### Resuming after an interruption
-
-If ingestion is interrupted, simply run the same command again. The pipeline reads `indexed_files.txt` and skips every file it has already processed. It will continue from where it left off.
+**If ingestion is interrupted:** just re-run the same command. `indexed_files.txt` tracks what's done and skips it.
 
 ---
 
-## 6. Running the Web App (Search)
+## 7. Running the Web App
 
 ```bash
 python app.py
+# Open: http://localhost:7860
 ```
 
-Open your browser at **http://localhost:7860**
+**Tabs:**
 
-The app has four tabs:
-- **Search Candidates** — natural language search with fit percentage results
-- **Upload & Ingest** — add individual CVs or point to a new folder
-- **Send Emails** — send interview invitations to candidates from your last search
-- **Setup** — quick-start guide
-
----
-
-## 7. Pipeline Code — Detailed Walkthrough
-
-This section explains every part of `pipeline.py` in enough detail for the team to understand, modify, and extend it.
-
----
-
-### 7.1 Configuration
-
-```python
-CHROMA_DIR         = "./chroma_db"
-BM25_FILE          = "./bm25_index.pkl"
-INDEXED_FILE       = "./indexed_files.txt"
-EMBED_MODEL        = "BAAI/bge-small-en-v1.5"
-TESSERACT_CMD      = r"D:\tessert\tesseract.exe"
-N_DENSE_FETCH      = 500
-BM25_REBUILD_EVERY = 20
-SCORE_SCALE        = 0.35
-SCORE_SHIFT        = 2.0
-```
-
-These are the only values you should need to change between deployments. Everything else in the file is logic, not configuration.
-
-| Variable | What it does |
+| Tab | What it does |
 |---|---|
-| `CHROMA_DIR` | Folder where the vector database is stored on disk |
-| `BM25_FILE` | Path to the pickled BM25 keyword index |
-| `INDEXED_FILE` | Plain text skip-list of already-processed filenames |
-| `EMBED_MODEL` | The sentence transformer model used for embeddings |
-| `TESSERACT_CMD` | Full path to the Tesseract executable |
-| `N_DENSE_FETCH` | How many chunks to pull from ChromaDB before reranking |
-| `BM25_REBUILD_EVERY` | How often to rebuild BM25 during ingestion (every N files) |
-| `SCORE_SCALE` | Controls how spread-out fit percentages are (higher = more spread) |
-| `SCORE_SHIFT` | Controls where 50% lands on the raw score scale (higher = stricter) |
+| 🔍 Search Candidates | Manual search with section filter, top-k, min fit % sliders |
+| 🤖 AI Assistant | Conversational chat with Agent 1 |
+| 📁 Upload & Ingest | Upload individual PDFs or point to a folder |
+| ✉️ Send Emails | Send interview invitations to candidates from your last search |
+| ⚙️ Setup | Quick-start guide |
+
+**Email setup (Gmail):**
+
+```bash
+set SMTP_USER=you@gmail.com
+set SMTP_PASS=your_app_password   # Gmail App Password, not your login password
+python app.py
+```
 
 ---
 
-### 7.2 The Skip-List (Never Start Over)
+## 8. Pipeline Deep Dive
 
-```python
-def load_indexed_set() -> set[str]:
-    p = Path(INDEXED_FILE)
-    if not p.exists():
-        return set()
-    return {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()}
+### Text Extraction
 
-def mark_indexed(filename: str):
-    with open(INDEXED_FILE, "a", encoding="utf-8") as f:
-        f.write(filename + "\n")
-```
+Uses PyMuPDF (`fitz`) to extract embedded text first. OCR (Tesseract) only runs if native extraction yields fewer than 30 characters — meaning the PDF is genuinely scanned. This keeps ingestion fast; most CVs skip OCR entirely.
 
-**The problem it solves:** The old approach called `processed_files()` which queried ChromaDB for all stored metadata to get the list of indexed files. With thousands of CVs, this is slow. It also meant any crash or interruption forced re-checking the entire database.
+### Section-Aware Chunking
 
-**How it works:** `indexed_files.txt` is a plain text file with one filename per line. When ingestion starts, it reads this file into a Python `set` in milliseconds. After each CV is successfully processed, its filename is appended to the file immediately. If the process crashes on file 500 of 2000, restarting skips the first 499 instantly.
+Instead of fixed-size windows, the chunker detects CV section headers (Skills, Experience, Education, Projects, etc.) using regex patterns and splits on those boundaries. Result: each chunk belongs to a named section and contains coherent content. This improves search quality significantly vs. character-based chunking.
 
-**Rebuilding:** Running with `--rebuild` deletes this file along with ChromaDB and BM25, so everything is re-indexed from scratch.
+### Hybrid Search: BM25 + ChromaDB
 
----
+Two retrieval signals run in parallel on every query:
 
-### 7.3 Embedding Model (Singleton)
+- **ChromaDB (dense):** Embeds the query with `BAAI/bge-small-en-v1.5` and finds the 500 most semantically similar chunks. Understands meaning — "senior developer" matches "experienced engineer".
+- **BM25 (sparse):** Scores every chunk by keyword overlap. Excellent for rare/specific terms like "COBOL" or "Simulink" that the embedding model may underweight.
 
-```python
-_embed_model = None
+Results are merged with **Reciprocal Rank Fusion (RRF)** — a formula that combines rankings (not raw scores) from both lists.
 
-def get_embed_model():
-    global _embed_model
-    if _embed_model is None:
-        from sentence_transformers import SentenceTransformer
-        print(f"  Loading embedding model: {EMBED_MODEL} (CPU) …")
-        _embed_model = SentenceTransformer(EMBED_MODEL, device="cpu")
-    return _embed_model
-```
+### CrossEncoder Reranking
 
-**What an embedding model does:** It converts any piece of text into a list of numbers (a vector) that represents the semantic meaning of that text. Two pieces of text with similar meanings will produce vectors that are close together in this mathematical space, even if they use completely different words. For example, "software engineer with Python experience" and "developer proficient in Python programming" will produce similar vectors.
+The top merged candidates are re-scored by `cross-encoder/ms-marco-MiniLM-L-6-v2`, a model that reads the query and candidate text *together* and produces a precise relevance score. More accurate than vector similarity alone. Runs as a singleton (loaded once, reused).
 
-**The model:** `BAAI/bge-small-en-v1.5` produces 384-dimensional vectors. It is specifically designed for retrieval tasks (matching queries to documents) and is one of the most accurate models available at its size. It runs well on CPU — no GPU required.
+### Fit Percentage
 
-**The singleton pattern:** The `global _embed_model` with a `None` check means the model is loaded from disk exactly once, no matter how many times `get_embed_model()` is called. Loading takes 3–5 seconds. Subsequent calls return the already-loaded model instantly.
+Raw CrossEncoder scores are mapped to 0–100% using a sigmoid function. Thresholds: **Strong match ≥ 70%**, **Good match 45–69%**, **Partial < 45%**.
 
-**The BGE query prefix:**
+### Query Expansion (`query_rewriter.py`)
 
-```python
-BGE_PREFIX = "Represent this sentence for searching relevant passages: "
+Before search, the HR's query is sent to Groq which expands it: abbreviations (`ML` → `machine learning`), synonyms (`React` → `React.js / ReactJS`), must-have skills, and minimum years of experience. Multiple query variants run through the full pipeline and results are merged.
 
-def embed_query(query: str) -> list[float]:
-    vec = get_embed_model().encode([BGE_PREFIX + query], ...)
-```
+### Search Performance
 
-This prefix is specific to the BGE model family. It tells the model that this text is a search query that should be matched against documents, as opposed to a document being stored. Without it, query vectors are slightly less accurate. Document chunks are embedded without this prefix.
-
----
-
-### 7.4 Text Extraction — The OCR Fix
-
-```python
-def extract_text(file_path: str) -> tuple[str, str]:
-    ext = Path(file_path).suffix.lower()
-
-    if ext == ".pdf":
-        native = _native_text(file_path)
-        print(f"    native chars: {len(native)}")
-
-        if len(native) >= 30:
-            return native, "native"   # ← early return — OCR never runs
-
-        # Only reaches here if PDF has no embedded text (truly scanned)
-        print(f"    → OCR fallback")
-        ocr = _ocr_pdf(file_path)
-        ...
-```
-
-**The original bug:** Most CV datasets contain PDFs with text already embedded — the kind you can select and copy in a PDF viewer. PyMuPDF (`fitz`) extracts this text in milliseconds. OCR (Tesseract) renders each page as an image and reads it visually, which takes 5–20 seconds per page. The previous version had the `>= 30` check but still allowed the code to fall through to OCR on some paths.
-
-**The fix:** A hard `return` statement on the happy path makes it structurally impossible for OCR to run when native text was successfully extracted. The `print(f"native chars: {len(native)}")` line is intentional — it lets you verify in the ingestion logs that OCR is only running on the few genuinely scanned PDFs.
-
-**Two extraction functions:**
-
-`_native_text(path)` — opens the PDF with PyMuPDF and reads the embedded text layer from each page. Returns an empty string if the PDF has no text layer.
-
-`_ocr_pdf(path)` — opens the PDF with PyMuPDF, renders each page as a PNG image at 200 DPI, passes each image to Tesseract, and concatenates the results. Only called when `_native_text` returns fewer than 30 characters.
-
----
-
-### 7.5 Contact Extraction
-
-```python
-def extract_contact(text: str) -> dict:
-    email_m  = re.search(r"[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}", text)
-    phone    = re.search(r"\+?[\d][\d\s\-().]{8,14}[\d]", text[:600])
-    linkedin = re.search(r"linkedin\.com/in/[\w\-]+", text, re.I)
-
-    # Name: first short capitalised line that isn't metadata
-    for line in lines[:10]:
-        if re.search(r"[@|http|www|\d{4,}|CV|Resume]", line, re.I):
-            continue
-        if 2 <= len(words) <= 5 and len(line) < 55 and line[0].isupper():
-            name = line; break
-```
-
-This uses regular expressions, not AI — it is fast and entirely predictable. Each pattern:
-
-- **Email:** Standard email regex, searched across the entire text.
-- **Phone:** Searched only in the first 600 characters (where contact info appears), matching 10–16 digit sequences with common separators.
-- **LinkedIn:** Looks for the pattern `linkedin.com/in/username`.
-- **Name:** Inspects the first 10 lines for the first line that is 2–5 words, starts with a capital letter, is under 55 characters, and contains no `@`, `http`, `www`, four-digit numbers, or the words "CV" or "Resume". This handles most standard resume formats but will miss names on CVs that open with a job title instead.
-
----
-
-### 7.6 Section-Aware Chunking
-
-```python
-SECTION_KEYWORDS = {
-    "skills":     r"\b(skills?|technologies|tools|competenc|tech stack|...)\b",
-    "experience": r"\b(experience|work history|employment|career|...)\b",
-    "education":  r"\b(education|university|college|degree|...)\b",
-    "projects":   r"\b(projects?|portfolio|github|capstone|...)\b",
-    ...
-}
-```
-
-**Why not fixed-size chunks?** Most RAG tutorials split documents into fixed-size windows of, say, 500 characters. This is simple but problematic for CVs — a chunk might cut halfway through a job description, mixing experience text with education text in the same chunk. This confuses the embedding model and degrades search quality.
-
-**How section chunking works:** The function `detect_section(line)` scans each line of the CV text looking for section headers. When it finds one (e.g. "SKILLS", "Work Experience", "Education"), it saves everything accumulated since the last header as one chunk labeled with that section name, then starts a new buffer. The result is chunks like:
-
-```
-Chunk(section="skills",     text="Python, Django, PostgreSQL, Docker, AWS...")
-Chunk(section="experience", text="Software Engineer at XYZ Corp (2020–2023)...")
-Chunk(section="education",  text="BSc Computer Science, Cairo University, 2019...")
-```
-
-**False positive filtering:** The regex `_FALSE_POS` prevents common phrases like "professional experience", "technical skills", and "university of" from being misidentified as section headers. These are content words that appear inside sections, not titles.
-
-**Tiny chunk merging:** After chunking, any chunk with fewer than 60 real characters (controlled by `MIN_CHUNK_CHARS`) is merged into the previous chunk. This handles CVs where section headers are followed by only a line or two of content.
-
----
-
-### 7.7 ChromaDB — The Vector Store
-
-```python
-def get_collection():
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    _collection = client.get_or_create_collection(
-        name="cvs",
-        metadata={"hnsw:space": "cosine"},
-    )
-```
-
-ChromaDB is the vector database that stores the embedded chunks. It persists everything to the `chroma_db/` folder on disk, so the data survives restarts and is only built once.
-
-**What gets stored per chunk:**
-
-| Field | Example |
+| Step | Time |
 |---|---|
-| `id` | `john_smith.pdf::skills::a3f2b1c0` |
-| `document` | `"Python, TensorFlow, Django, PostgreSQL..."` |
-| `embedding` | `[0.023, -0.147, 0.891, ...]` (384 numbers) |
-| `file` | `"john_smith.pdf"` |
-| `section` | `"skills"` |
-| `name` | `"John Smith"` |
-| `email` | `"john@email.com"` |
-| `phone` | `"+20 100 123 4567"` |
-| `linkedin` | `"linkedin.com/in/johnsmith"` |
-
-**`hnsw:space: cosine`** tells ChromaDB to use cosine similarity when comparing vectors. This is the correct metric for normalized embeddings — it measures the angle between two vectors, ignoring their magnitude. Two vectors pointing in the same direction have a cosine similarity of 1.0 (identical meaning); two vectors pointing in opposite directions have a similarity of -1.0.
-
-**`upsert` instead of `insert`** means if a chunk with the same ID already exists in the database, it is updated in place rather than creating a duplicate. This makes ingestion safe to re-run on the same files.
-
----
-
-### 7.8 BM25 — The Keyword Index
-
-```python
-def rebuild_bm25():
-    corpus  = [document.lower().split() for document in all_chunks]
-    bm25    = BM25Okapi(corpus)
-    pickle.dump({"bm25": bm25, "ids": doc_ids}, open(BM25_FILE, "wb"))
-```
-
-BM25 (Best Match 25) is a classical information retrieval algorithm from the 1990s. It scores documents based on two factors:
-- How many times a query word appears in the document (term frequency)
-- How rare the query word is across all documents (inverse document frequency)
-
-A word like "Python" that appears in half the CVs gets a lower IDF weight than a rare term like "Fortran". This means BM25 naturally rewards exact matches for rare, specific terms.
-
-**Why use BM25 alongside vector search?** Vector search understands meaning but can miss exact keyword matches. BM25 finds exact matches but has no understanding of meaning. The combination is consistently more accurate than either alone — a well-known result in information retrieval research.
-
-**When BM25 is rebuilt:** During ingestion it is rebuilt every `BM25_REBUILD_EVERY` new files (currently 20) and once at the very end. During a single-file upload through the web app it is rebuilt immediately after indexing. It is saved as a pickle file and loaded into memory at search time — no disk reads during a search.
-
----
-
-### 7.9 The Search Pipeline
-
-A query goes through five stages. Each stage progressively narrows the candidate pool while improving ranking quality.
-
-#### Stage 1 — Dense retrieval (semantic search)
-
-```python
-qvec = embed_query(query)
-r = col.query(
-    query_embeddings=[qvec],
-    n_results=500,
-    include=["documents", "metadatas", "distances"],
-)
-```
-
-The query is embedded into a 384-dimensional vector using the same BGE model used during ingestion. ChromaDB's HNSW index finds the 500 most similar chunk vectors using approximate nearest-neighbour search. This is the semantic understanding step — it finds candidates who match the meaning of the query even if they use different words.
-
-#### Stage 2 — Sparse retrieval (keyword search)
-
-```python
-bm25_scores = bm25.get_scores(query.lower().split())
-ranked = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)
-sparse_ids = [bm25_ids[i] for i in ranked if bm25_scores[i] > 0]
-```
-
-The query is split into words and scored against every chunk in the BM25 index. This produces a ranked list of chunks ordered by keyword relevance. It runs in milliseconds because BM25 is entirely in memory.
-
-#### Stage 3 — RRF fusion
-
-```python
-def _rrf(dense_ids, sparse_ids, k=60):
-    score = 1/(k + rank_in_dense) + 1/(k + rank_in_sparse)
-```
-
-Reciprocal Rank Fusion merges the two ranked lists into one combined ranking. The formula gives each chunk a score based on its position in each list — not the raw similarity score, just the rank. A chunk ranked #1 in both lists gets the highest possible combined score. A chunk ranked #50 in one list and not appearing at all in the other gets a much lower score.
-
-The constant `k=60` is a smoothing factor that prevents the top-ranked position from having an overwhelming influence on the combined score.
-
-#### Stage 4 — Deduplication and merging
-
-After fusion, results are deduplicated per candidate. All chunks from the same CV file are merged into a single candidate entry, with all their text concatenated. This means the reranker in Stage 5 can see the full picture of each candidate, not just one chunk.
-
-#### Stage 5 — CrossEncoder reranking
-
-```python
-reranker = get_reranker()   # singleton — loaded once
-pairs    = [(query, candidate_text[:2000]) for c in candidates]
-scores   = reranker.predict(pairs)
-```
-
-The CrossEncoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) is a fundamentally different type of model from the embedding model. Instead of encoding the query and document separately and comparing their vectors, it reads the query and the candidate text together as a single input and outputs a relevance score.
-
-This is more accurate because the model can see the relationship between specific query words and specific candidate words. The trade-off is speed — the CrossEncoder must process each candidate individually, which is why it only runs on the already-filtered top candidates, not all 500 chunks from Stage 1.
-
-The reranker is a singleton (like the embedding model), loaded once and kept in memory. The first search call loads it in ~5 seconds; every subsequent call uses the already-loaded model.
-
----
-
-### 7.10 Fit Percentage
-
-```python
-SCORE_SCALE = 0.35
-SCORE_SHIFT = 2.0
-
-def _sigmoid_pct(raw_score: float) -> int:
-    return round(100 / (1 + math.exp(-SCORE_SCALE * (raw_score - SCORE_SHIFT))))
-```
-
-The CrossEncoder outputs a raw number roughly in the range -10 to +10. This number is not a percentage and has no intuitive meaning on its own. The sigmoid function maps it smoothly to a 0–100% value:
-
-| Raw score | Fit % (default settings) |
-|---|---|
-| -4 | ~5% |
-| 0  | ~24% |
-| 2  | ~50% |
-| 4  | ~72% |
-| 7  | ~93% |
-| 10 | ~98% |
-
-`SCORE_SHIFT` controls where 50% sits on the raw scale. With the default value of 2.0, a raw score of 2.0 maps to exactly 50%. Increasing `SCORE_SHIFT` moves the 50% point higher, making the system stricter. `SCORE_SCALE` controls the steepness of the curve — a larger value spreads scores further apart.
-
-When the reranker is disabled, fit percentage falls back to keyword hit ratio × 100.
-
-**Match quality thresholds:**
-
-| Badge | Fit % | Meaning |
-|---|---|---|
-| Strong match | ≥ 70% | High semantic and keyword match |
-| Good match | 45–69% | Moderate relevance |
-| Partial | < 45% | Low match, shown for completeness |
-
----
-
-## 8. How the Two-Phase Design Works
-
-This design decision is what makes the system fast in production.
-
-**Phase 1 (ingestion)** is slow by nature — it reads PDFs, runs models, and writes to disk. It runs once, unattended, typically overnight for a large dataset. A dataset of 2,000 CVs takes 30–90 minutes on CPU depending on how many are scanned.
-
-**Phase 2 (search)** is fast by design — everything is precomputed and stored. When a search query arrives:
-
-1. Embedding the query: ~50ms
-2. ChromaDB vector search: ~100–200ms
-3. BM25 scoring: ~20ms
-4. RRF fusion + deduplication: ~10ms
-5. CrossEncoder reranking (top 5–20 candidates): ~200–800ms
-6. Fit percentage + enrichment: ~5ms
-
-**Total: 0.5–1.5 seconds per search**, regardless of how many CVs are in the database.
-
-Adding a new CV through the web app triggers the full ingestion pipeline for just that one file, then rebuilds BM25. This takes a few seconds and does not affect the database state for other users.
+| Query embedding | ~50ms |
+| ChromaDB vector search | ~100–200ms |
+| BM25 scoring | ~20ms |
+| RRF + dedup | ~10ms |
+| CrossEncoder reranking | ~200–800ms |
+| **Total** | **~0.5–1.5s** |
 
 ---
 
 ## 9. Search Quality Explained
 
-The system uses three complementary signals to rank candidates:
+Three signals work together:
 
-**Semantic similarity (vector search)** captures meaning. "Experienced software developer" and "senior programmer" will match a query about "software engineer" even though the words are different. This is the dominant signal for general-purpose queries.
-
-**Keyword matching (BM25)** captures specificity. If a query contains a rare technical term like "COBOL" or "Simulink", BM25 will surface candidates who use that exact term with high weight. Vector search might miss these if the model hasn't seen the term often enough during training.
-
-**CrossEncoder reranking** is the final arbiter. It reads the query and each candidate's full merged text together and produces the most accurate relevance score of the three. It is slower than the other two signals, which is why it only runs on the shortlist produced by Steps 1–3.
-
-The **fit percentage** is derived from the CrossEncoder score and represents the system's overall confidence that this candidate matches the query.
+- **Semantic similarity** — captures meaning. Finds candidates who match the *intent* of the query even with different wording.
+- **Keyword matching (BM25)** — captures specificity. Surfaces candidates who use the exact rare terms in the query.
+- **CrossEncoder reranking** — final arbiter. Reads query + candidate text together for the most accurate relevance score.
 
 ---
 
-## 10. Tuning & Configuration Reference
+## 10. Configuration Reference
 
-### Improving recall (finding more relevant candidates)
+All tuneable values are at the top of `pipeline.py`:
 
-Increase `N_DENSE_FETCH` from 500 to 1000. This means more chunks are considered before reranking, at the cost of slightly slower searches.
+| Variable | Default | What it does |
+|---|---|---|
+| `EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Embedding model used for indexing and queries |
+| `N_DENSE_FETCH` | `500` | Chunks pulled from ChromaDB before RRF (increase for better recall) |
+| `BM25_REBUILD_EVERY` | `20` | Rebuild BM25 every N new files during ingestion |
+| `SCORE_SCALE` | `0.35` | Sigmoid steepness — higher = scores more spread apart |
+| `SCORE_SHIFT` | `2.0` | Where 50% sits on the raw score scale — higher = stricter |
+| `TESSERACT_CMD` | *(your path)* | Full path to Tesseract executable |
+| `OCR_DPI` | `200` | Render DPI for scanned pages (lower = faster, less accurate) |
 
-### Making fit percentages stricter
-
-Increase `SCORE_SHIFT` from 2.0 to 3.5. This moves the 50% midpoint higher on the raw score scale, so fewer candidates will show high percentages.
-
-### Spreading out fit percentages more
-
-Increase `SCORE_SCALE` from 0.35 to 0.5. This steepens the sigmoid curve so scores are more spread between 0% and 100%.
-
-### Faster ingestion
-
-Increase the embedding batch size from 64 to 128 if your machine has enough RAM (> 8GB). Reduce `OCR_DPI` from 200 to 150 for faster but slightly less accurate OCR on scanned PDFs.
-
-### GPU acceleration
-
-Change `device="cpu"` to `device="cuda"` in `get_embed_model()`. This requires a CUDA-capable GPU with 4GB+ VRAM and reduces ingestion time by 10–20×.
+**Common adjustments:**
+- Scores clustering together → increase `SCORE_SCALE` to `0.5`
+- Too many low-quality results → increase `SCORE_SHIFT` to `3.0`
+- Missing relevant candidates → increase `N_DENSE_FETCH` to `1000`
 
 ---
 
-## 11. Next Steps for the Team
+## 11. Team — Who Owns What
 
-### Priority 1 — Evaluate result quality
+| Person | Component | Status |
+|---|---|---|
+| Afaf | Agent 1 — Conversational Search (`RetriveCVAgent.py`) + base pipeline | ✅ Done |
+| Teammate 2 | Agent 2 — Reasoning Agent | 🔲 To build |
+| Teammate 3 | Agent 3 — Email Agent | 🔲 To build |
+| Teammate 4 | Agent 4 — Candidate Gap Agent | 🔲 To build |
 
-Before any further development, run 20–30 representative job description queries against the indexed dataset and manually assess whether the top 5 results are genuinely good candidates. This will:
-- Reveal whether `SCORE_SHIFT` needs adjustment for your specific dataset
-- Identify CV formats that the section chunker misparses
-- Give you a baseline accuracy number to measure future improvements against
+**Shared infrastructure** (everyone depends on this, don't modify without coordinating):
+- `pipeline.py` — ingestion + `search()` function
+- `query_rewriter.py` — `smart_search()` function
+- ChromaDB schema (metadata fields: `file`, `section`, `name`, `email`, `phone`, `linkedin`)
 
-### Priority 2 — Job description matching
+**How new agents plug in:** Each agent imports `smart_search` from `query_rewriter.py` and calls it the same way Agent 1 does:
 
-Currently users type a freeform query. A better workflow would accept a full job description — the system would automatically extract required skills, preferred experience, and seniority level, then construct a weighted query. The skills section would carry more weight than the summary section. This requires a small LLM call to parse the job description, then passes the extracted requirements into the existing search pipeline.
+```python
+from query_rewriter import smart_search
 
-### Priority 3 — GPU deployment
+results, rq = smart_search(query, top_k=5, section_filter=None, use_reranker=True, min_fit_pct=25)
+```
 
-For teams ingesting datasets continuously (new CVs arriving daily), GPU acceleration on the embedding model reduces per-CV processing time from ~2 seconds to ~0.1 seconds. The change is a single argument: `device="cuda"` in `get_embed_model()`. The CrossEncoder reranker benefits similarly.
+`results` is a list of dicts. Each dict contains:
 
-### Priority 4 — Structured output and export
-
-Add a results export button to the UI that produces a CSV or Excel file with all result fields (name, email, phone, LinkedIn, fit score, sections matched). This is useful when the hiring team wants to share a shortlist with someone who doesn't have access to the web app.
+```python
+{
+    "metadata": {"name": "...", "email": "...", "phone": "...", "linkedin": "...", "file": "..."},
+    "fit_pct": 72,
+    "match_quality": "strong",   # "strong" | "good" | "partial"
+    "years_exp": 4,
+    "keyword_hits": 7,
+    "sections_found": ["skills", "experience", "projects"],
+    "all_chunks": ["chunk text 1", "chunk text 2", ...],
+    "text": "full merged candidate text",
+}
+```
 
 ---
 
-## 12. Troubleshooting
+## 12. Next Steps for the Team
 
-### OCR is running on every file (slow ingestion)
+### Agent 2 — Reasoning Agent
+- Input: `results` list from `smart_search()` + the original HR query
+- For each candidate: send `(query, candidate["text"])` to Groq with a prompt that asks for cited, evidence-based reasoning
+- Output: a short structured justification per candidate, referencing specific sections
+- Plug in: called after Agent 1 returns results, adds a `"reasoning"` key to each result dict
 
-Check the ingestion log. If you see `native chars: 0` for files that should have extractable text, PyMuPDF may not be installed correctly. Run `pip install pymupdf` and try again.
+### Agent 3 — Email Agent
+- Input: selected candidate dict (with reasoning from Agent 2) + HR's job requirements
+- Prompt Groq to write a personalized email that references the candidate's specific background
+- Output: draft email string ready for the Send Emails tab
+- Should use the existing `send_email()` function in `app.py` to actually send
 
-If you see `native chars: 15` (a small but non-zero number), those PDFs have minimal embedded text (perhaps just page numbers). They are genuinely scanned documents and OCR is appropriate.
+### Agent 4 — Candidate Gap Agent
+- Input: candidate CV text (`candidate["text"]`) + job description or HR query
+- Prompt Groq to compare the two and identify specific, named gaps with actionable suggestions
+- Output: structured gap report (missing skills, experience gaps, recommended resources, rough timeline)
+- Can be triggered from the Search tab with a "Gap Report" button per candidate card
 
-### "No candidates found" on every search
+### LangGraph Orchestration (future)
+Once all four agents exist as standalone functions, wrap them in a LangGraph graph with a supervisor node for conditional routing. This is what lets you say on your CV: *"multi-agent system with graph-based orchestration"*.
 
-The BM25 index may be missing or empty. After ingestion completes, check that `bm25_index.pkl` exists in the project folder. If it doesn't, run:
+---
 
+## 13. Troubleshooting
+
+**OCR running on every file (slow ingestion)**
+Check `native chars:` in the log. If it shows `0` for normal PDFs, PyMuPDF may not be installed: `pip install pymupdf`.
+
+**"No candidates found" on every search**
+`bm25_index.pkl` may be missing. Rebuild it:
 ```python
 from pipeline import rebuild_bm25
 rebuild_bm25()
 ```
 
-### ChromaDB error on startup
+**ChromaDB error on startup**
+Database may be corrupt from a hard crash. Run `--rebuild` to start fresh (re-ingestion required).
 
-If ChromaDB fails to open, the database may be corrupt (e.g. from a hard crash during a write). Run with `--rebuild` to start fresh. Your `indexed_files.txt` will also be deleted, so ingestion will re-process all files.
+**Reranker not loading**
+The CrossEncoder downloads from HuggingFace on first use — needs internet on the first run. If it fails, use the Reranker checkbox in the UI to disable it temporarily.
 
-### Reranker not loading
+**Fit percentages all clustering near the same value**
+Increase `SCORE_SCALE` in `pipeline.py` (e.g. `0.35` → `0.55`).
 
-The CrossEncoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) is downloaded automatically on first use from HuggingFace. This requires an internet connection on the first run. If the download fails, you can disable the reranker with the checkbox in the UI and results will still be ranked by RRF fusion alone.
-
-### Fit percentages all clustering near the same value
-
-Adjust `SCORE_SCALE` upward (e.g. from 0.35 to 0.55) to spread scores further apart. If all scores are very low (< 20%), also try reducing `SCORE_SHIFT` from 2.0 to 1.0.
-Resume screening automation
-Recruitment candidate matching
-Semantic CV search systems
-HR analytics tools
+**Agent returns "GROQ_API_KEY not set"**
+Set the environment variable before running `app.py`:
+```bash
+set GROQ_API_KEY=gsk_...   # Windows
+export GROQ_API_KEY=gsk_... # Mac/Linux
+```
