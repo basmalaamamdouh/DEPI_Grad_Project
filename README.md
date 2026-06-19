@@ -195,7 +195,7 @@ pip install gradio sentence-transformers chromadb rank-bm25 pymupdf pillow groq
 ```bash
 # Windows
 set GROQ_API_KEY=gsk_...
-
+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  #this is the API i used 
 # Mac / Linux
 export GROQ_API_KEY=gsk_...
 ```
