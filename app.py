@@ -26,8 +26,8 @@ from RetriveCVAgent import run_agent_turn
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "maryemahmed707@gmail.com")
-SMTP_PASS = os.getenv("SMTP_PASS", "fmclfhunzuixcnol")
+SMTP_USER = os.getenv("SMTP_USER", "email")
+SMTP_PASS = os.getenv("SMTP_PASS", "pass")
 HR_NAME   = os.getenv("HR_NAME",   "HR Team")
 
 SECTIONS = ["Any", "skills", "experience", "education", "projects",
