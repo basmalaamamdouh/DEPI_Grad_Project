@@ -8,6 +8,7 @@ import os, math, smtplib
 from pathlib import Path
 from email.mime.text      import MIMEText
 from email.mime.multipart import MIMEMultipart
+from EmailAgent import run_email_agent_turn, send_personalized_email
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
@@ -25,8 +26,8 @@ from RetriveCVAgent import run_agent_turn
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_USER = os.getenv("SMTP_USER", "maryemahmed707@gmail.com")
+SMTP_PASS = os.getenv("SMTP_PASS", "fmclfhunzuixcnol")
 HR_NAME   = os.getenv("HR_NAME",   "HR Team")
 
 SECTIONS = ["Any", "skills", "experience", "education", "projects",
@@ -380,17 +381,14 @@ THEME = gr.themes.Default(
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
-:root {
+
+.gradio-container, .gradio-container * {
   --canvas:#EDEEEA; --panel-2:#FFFFFF;
   --ink:#1C1F1B; --ink-soft:#5C6259; --line:#D9DAD3;
   --signal:#2F6F4E; --signal-soft:#E3EFE7;
-  --caution:#9A6B12; --caution-soft:#F3E9D2;
   --mute:#6B7177; --mute-soft:#E7E8E5;
   --spotlight:#C2410C;
 }
-
-.gradio-container { font-family:'Inter',ui-sans-serif,system-ui !important; }
-.prose h1, .prose h2, .prose h3 { font-family:'Space Grotesk',sans-serif !important; }
 
 /* ── Header strip ───────────────────────────────────────────────────────── */
 #header-strip {
@@ -711,8 +709,8 @@ with gr.Blocks(title="HR Assistant — CV RAG") as demo:
 
         # ── Tab 3: Email ──────────────────────────────────────────────────────
         with gr.Tab("✉️ Send Emails"):
-            gr.Markdown("### Send interview invitations from your last search")
-            gr.Markdown("Use `{name}` in the body for personalisation.")
+            gr.HTML("<h3 style='color:#1C1F1B;font-family:Space Grotesk,sans-serif;margin:0 0 6px'>Send interview invitations from your last search</h3>")
+            gr.HTML("<p style='color:#5C6259;font-family:monospace;font-size:.85em;margin:0 0 14px'>Use <code style='background:#E7E8E5;padding:2px 6px;border-radius:3px;color:#1C1F1B'>{name}</code> in the body for personalisation.</p>") 
             load_btn     = gr.Button("Load candidates from last search")
             candidate_dd = gr.Dropdown(label="Select candidate", choices=[], interactive=True)
             subject_box  = gr.Textbox(label="Subject", value=DEFAULT_SUBJECT)

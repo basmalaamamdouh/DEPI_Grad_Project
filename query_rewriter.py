@@ -101,7 +101,8 @@ def rewrite_query(query: str) -> RewrittenQuery:
     if not query:
         return RewrittenQuery(primary=query)
 
-    api_key = os.getenv("GROQ_API_KEY", "")
+    api_key = os.environ.get("GROQ_API_KEY", "")
+
     if not api_key:
         print("  [query_rewriter] GROQ_API_KEY not set — skipping rewrite")
         print("  Get a free key at: https://console.groq.com")
