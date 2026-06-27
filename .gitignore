@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 venv/
 venv310/
 __pycache__/
@@ -7,6 +8,17 @@ __pycache__/
 chroma_db/
 Data/
 output/
+=======
+venv/
+venv310/
+__pycache__/
+*.pyc
+*.pkl
+*.faiss
+chroma_db/
+Data/
+output/
+>>>>>>> ccd2dadd5377540db68e843a6ff95315064a1051
 .env__pycache__/
 .env
 chroma_db/
