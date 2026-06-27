@@ -1,0 +1,27 @@
+<<<<<<< HEAD
+Anwar Mousa-Date.pdf
+CV Maryem Ahmed (3).pdf
+Completion Certificate _ SkillsBuild.pdf
+Course 2 ML.pdf
+Coursera 1YU8DI0GH2HU.pdf
+FLB-FL_Course Certificate En.pdf
+Maryem Ahmed CV.pdf
+Maryem Ahmed Certificate.pdf
+Maryem Ahmed Sobeih Abdelrahman.pdf
+Maryem Ahmed Subaih.pdf
+Maryem Ahmed's CV.pdf
+Maryem Ahmed's Certificate.pdf
+Maryem Ahmed's Resume  (1).pdf
+Maryem Ahmed's certificate_FE.pdf
+Maryem Ahmed-AI.pdf
+My Learning _ NVIDIA.pdf
+RIASEC (Occupations).pdf
+Supervised Learning.pdf
+Tcz8gTtprzAS4xSoK_SKZxezskWgmFjRvj9_KiWjcsnS4jpYdxKfx_1744675729730_completion_certificate.pdf
+Unsupervised Learning.pdf
+first de.pdf
+pandas DataCamp.pdf
+pytorch.pdf
+=======
+Maryem Ahmed-AI.pdf
+>>>>>>> 7cb96ab0242e7ec6d1ccb25630fe6e49f114bbab
