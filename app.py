@@ -1,3 +1,48 @@
+import subprocess
+import sys
+
+try:
+    import sentence_transformers
+except ModuleNotFoundError:
+    print("Installing sentence_transformers... Please wait...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "sentence-transformers"])
+import subprocess
+import sys
+import os
+
+# 1. Force add your Groq API Key directly in the code so it's always found
+os.environ["GROQ_API_KEY"] = ""
+
+# 2. Automatically install missing libraries
+try:
+    import gradio as gr
+except ModuleNotFoundError:
+    print("Installing gradio... Please wait...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio"])
+
+try:
+    import groq
+except ModuleNotFoundError:
+    print("Installing groq... Please wait...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "groq"])
+
+try:
+    import chromadb
+except ModuleNotFoundError:
+    print("Installing chromadb... Please wait...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "chromadb"])
+
+try:
+    import rank_bm25
+except ModuleNotFoundError:
+    print("Installing rank_bm25... Please wait...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "rank-bm25"])
+    
+try:
+    import fitz # PyMuPDF
+except ModuleNotFoundError:
+    print("Installing PyMuPDF... Please wait...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pymupdf"])
 """
 HR Assistant — CV RAG System
 Run:  python app.py
@@ -18,6 +63,7 @@ from pipeline import (
 )
 from query_rewriter import smart_search, MIN_FIT_DEFAULT
 from RetriveCVAgent import run_agent_turn
+from ReasoningAgent import generate_candidate_reasoning
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EMAIL CONFIG
@@ -159,6 +205,8 @@ def _candidate_card(rank: int, r: dict) -> str:
         .strip()
     )
 
+    reasoning = r.get("reasoning","")
+
     return f"""
 <div class="frame-card">
   <div class="corner-bl"></div><div class="corner-br"></div>
@@ -207,6 +255,11 @@ def _candidate_card(rank: int, r: dict) -> str:
   <div class="scan-log">
     {preview}
   </div>
+
+  <div style="margin-top:18px;padding:14px;background:#F7F7F4;border-left:4px solid #2F6F4E;border-radius:6px;font-size:14px;line-height:1.6;white-space:pre-wrap;">
+    <b>Selection Justification</b><br><br>
+    {reasoning}
+  </div>
 </div>
 """
 
@@ -232,6 +285,15 @@ def cb_search(query: str, section: str, top_k: int, use_reranker: bool, min_fit_
         min_fit_pct=int(min_fit_pct),
     )
     _last_results = results
+
+    # Generate AI reasoning for each candidate
+    for r in results:
+        try:
+            cv_text = "\n".join(r.get("all_chunks", [r["text"]]))
+            r["reasoning"] = generate_candidate_reasoning(query, cv_text)
+        except Exception as e:
+            r["reasoning"] = f"Reasoning unavailable: {e}"
+
 
     # Show what Groq actually searched (only visible when rewrite ran)
     rewrite_note = ""
