@@ -7,7 +7,6 @@ def generate_candidate_reasoning(hr_query, candidate_text):
     Agent 2 - Candidate Reasoning Agent
     """
 
-    # نفس الـ API Key اللي app.py حاططها
     api_key = os.environ.get("GROQ_API_KEY")
 
     if not api_key:
@@ -53,7 +52,6 @@ Gap(s):
 
         response = client.chat.completions.create(
 
-            # نفس موديل Agent 1
             model="llama-3.3-70b-versatile",
 
             temperature=0,
