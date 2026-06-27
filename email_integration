@@ -1,0 +1,244 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# HOW TO INTEGRATE AGENT 3 INTO app.py
+# Apply these changes to your existing app.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── STEP 1: Add this import at the top of app.py (with your other imports) ──
+from EmailAgent import run_email_agent_turn, send_personalized_email
+
+
+# ── STEP 2: Add this new tab AFTER the existing "🤖 AI Assistant" tab ────────
+# Place it before "📁 Upload & Ingest"
+
+
+# ── Tab: Email Agent (Agent 3) ────────────────────────────────────────
+with gr.Tab("✉️ Email Agent"):
+    gr.HTML(
+        "<div style='font-family:JetBrains Mono,monospace;font-size:.75em;"
+        "color:#5C6259;padding:8px 0 4px;letter-spacing:.04em'>"
+        "AGENT 3 — PERSONALIZED EMAIL DRAFTING &amp; SENDING</div>"
+        "<p style='font-size:.92em;color:#1C1F1B;margin:0 0 14px'>"
+        "Tell the agent who to email — it reads their actual CV and writes "
+        "a personalized message. Review the draft, then say <strong>\"send it\"</strong>."
+        "</p>"
+    )
+    gr.HTML(
+        "<div style='margin-bottom:14px'>"
+        "<span style='font-family:monospace;font-size:.72em;color:#6B7177;"
+        "letter-spacing:.06em;text-transform:uppercase'>Try saying:</span><br>"
+        "<span class='chat-tip'>Send an email to sara@example.com</span>"
+        "<span class='chat-tip'>Draft an email to john.doe@gmail.com</span>"
+        "<span class='chat-tip'>Make it more casual</span>"
+        "<span class='chat-tip'>Add our Calendly link: calendly.com/hr-team</span>"
+        "<span class='chat-tip'>Send it</span>"
+        "</div>"
+    )
+    email_agent_chatbot = gr.Chatbot(
+        value=[], render_markdown=True, sanitize_html=False,
+        height=560, elem_id="email-agent-chatbot", label="", show_label=False,
+    )
+    with gr.Row():
+        job_context_box = gr.Textbox(
+            label="Role / job context (optional — helps personalize the email)",
+            placeholder="e.g. Senior Python Backend Engineer — FastAPI, PostgreSQL, remote",
+            scale=4,
+        )
+    with gr.Row(elem_classes=["chat-input-row"]):
+        email_chat_input = gr.Textbox(
+            placeholder="E.g. 'Send an email to candidate@example.com'",
+            show_label=False, scale=8, lines=1, max_lines=3,
+        )
+        email_send_btn = gr.Button("Send ↵", variant="primary", scale=1, min_width=80)
+    with gr.Row():
+        email_clear_btn = gr.Button("Clear conversation", variant="secondary", size="sm", scale=1)
+        gr.HTML(
+            "<div style='font-family:monospace;font-size:.72em;color:#6B7177;"
+            "padding:6px 0;flex:4'>Agent 3 · Powered by Groq LLaMA 3.3-70b · "
+            "Reads candidate CVs from your last search to personalize each email</div>"
+        )
+    email_llm_hist    = gr.State([])
+    email_agent_state = gr.State({})
+
+    def on_email_agent_send(user_msg, history, llm_history, agent_state, job_ctx):
+        if not user_msg.strip():
+            yield history, llm_history, agent_state, ""
+            return
+        history = history + [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content":
+                "<span style='font-family:monospace;font-size:.82em;color:#6B7177'>"
+                "⏳ Reading CV and drafting personalized email…</span>"},
+        ]
+        yield history, llm_history, agent_state, ""
+        reply_html, updated_llm_history, updated_state = run_email_agent_turn(
+            user_message=user_msg,
+            llm_history=llm_history,
+            last_results=_last_results,
+            agent_state=agent_state,
+            job_context=job_ctx,
+        )
+        history[-1]["content"] = reply_html
+        yield history, updated_llm_history, updated_state, ""
+
+    email_send_btn.click(
+        on_email_agent_send,
+        inputs=[email_chat_input, email_agent_chatbot, email_llm_hist,
+                email_agent_state, job_context_box],
+        outputs=[email_agent_chatbot, email_llm_hist, email_agent_state, email_chat_input],
+    )
+    email_chat_input.submit(
+        on_email_agent_send,
+        inputs=[email_chat_input, email_agent_chatbot, email_llm_hist,
+                email_agent_state, job_context_box],
+        outputs=[email_agent_chatbot, email_llm_hist, email_agent_state, email_chat_input],
+    )
+    email_clear_btn.click(
+        lambda: ([], [], {}, ""),
+        outputs=[email_agent_chatbot, email_llm_hist, email_agent_state, email_chat_input],
+    )
+
+    
+# ── Tab: Email Agent (Agent 3) ─────────────────────────────────────────────
+with gr.Tab("✉️ Email Agent"):
+
+    gr.HTML(
+        "<div style='font-family:JetBrains Mono,monospace;font-size:.75em;"
+        "color:#5C6259;padding:8px 0 4px;letter-spacing:.04em'>"
+        "AGENT 3 — PERSONALIZED EMAIL DRAFTING &amp; SENDING</div>"
+        "<p style='font-size:.92em;color:#1C1F1B;margin:0 0 14px'>"
+        "Tell the agent who to email — it reads their actual CV and writes "
+        "a personalized message. Review the draft, then say <strong>\"send it\"</strong>."
+        "</p>"
+    )
+
+    # Quick-start tips
+    gr.HTML(
+        "<div style='margin-bottom:14px'>"
+        "<span style='font-family:monospace;font-size:.72em;color:#6B7177;"
+        "letter-spacing:.06em;text-transform:uppercase'>Try saying:</span><br>"
+        "<span class='chat-tip'>Send an email to sara@example.com</span>"
+        "<span class='chat-tip'>Draft an email to john.doe@gmail.com</span>"
+        "<span class='chat-tip' style='margin-top:4px'>Make it more casual</span>"
+        "<span class='chat-tip'>Add our Calendly link: calendly.com/hr-team</span>"
+        "<span class='chat-tip'>Send it</span>"
+        "</div>"
+    )
+
+    email_agent_chatbot = gr.Chatbot(
+        value=[],
+        render_markdown=True,
+        sanitize_html=False,
+        height=560,
+        elem_id="email-agent-chatbot",
+        label="",
+        show_label=False,
+    )
+
+    with gr.Row():
+        job_context_box = gr.Textbox(
+            label="Role / job context (optional — helps personalize the email)",
+            placeholder="e.g. Senior Python Backend Engineer — FastAPI, PostgreSQL, remote",
+            scale=4,
+        )
+
+    with gr.Row(elem_classes=["chat-input-row"]):
+        email_chat_input = gr.Textbox(
+            placeholder="E.g. 'Send an email to candidate@example.com'",
+            show_label=False,
+            scale=8,
+            lines=1,
+            max_lines=3,
+        )
+        email_send_btn = gr.Button("Send ↵", variant="primary", scale=1, min_width=80)
+
+    with gr.Row():
+        email_clear_btn = gr.Button(
+            "Clear conversation", variant="secondary", size="sm", scale=1
+        )
+        gr.HTML(
+            "<div style='font-family:monospace;font-size:.72em;color:#6B7177;"
+            "padding:6px 0;flex:4'>Agent 3 · Powered by Groq LLaMA 3.3-70b · "
+            "Reads candidate CVs from your last search to personalize each email</div>"
+        )
+
+    # State: LLM history + per-draft agent state
+    email_llm_hist   = gr.State([])
+    email_agent_state = gr.State({})
+
+    def on_email_agent_send(
+        user_msg: str,
+        history: list,
+        llm_history: list,
+        agent_state: dict,
+        job_ctx: str,
+    ):
+        if not user_msg.strip():
+            yield history, llm_history, agent_state, ""
+            return
+
+        # Optimistic "thinking" update
+        history = history + [
+            {"role": "user",      "content": user_msg},
+            {"role": "assistant", "content":
+                "<span style='font-family:monospace;font-size:.82em;color:#6B7177'>"
+                "⏳ Reading CV and drafting personalized email…</span>"},
+        ]
+        yield history, llm_history, agent_state, ""
+
+        reply_html, updated_llm_history, updated_state = run_email_agent_turn(
+            user_message=user_msg,
+            llm_history=llm_history,
+            last_results=_last_results,     # global from app.py
+            agent_state=agent_state,
+            job_context=job_ctx,
+        )
+
+        history[-1]["content"] = reply_html
+        yield history, updated_llm_history, updated_state, ""
+
+    email_send_btn.click(
+        on_email_agent_send,
+        inputs=[email_chat_input, email_agent_chatbot, email_llm_hist,
+                email_agent_state, job_context_box],
+        outputs=[email_agent_chatbot, email_llm_hist, email_agent_state, email_chat_input],
+    )
+    email_chat_input.submit(
+        on_email_agent_send,
+        inputs=[email_chat_input, email_agent_chatbot, email_llm_hist,
+                email_agent_state, job_context_box],
+        outputs=[email_agent_chatbot, email_llm_hist, email_agent_state, email_chat_input],
+    )
+    email_clear_btn.click(
+        lambda: ([], [], {}, ""),
+        outputs=[email_agent_chatbot, email_llm_hist, email_agent_state, email_chat_input],
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL: Upgrade the existing "✉️ Send Emails" tab to use AI drafting
+# Add a "✨ AI Draft" button alongside the existing manual template
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Inside the existing "✉️ Send Emails" tab, after the body_box, add:
+ai_draft_btn = gr.Button("✨ Generate AI Draft", variant="secondary")
+ai_draft_status = gr.Textbox(label="Draft status", interactive=False, lines=1)
+
+def cb_ai_draft(email_addr: str, job_ctx: str):
+    """Generate a personalized draft for the selected candidate."""
+    if not email_addr:
+        return "", "", "❌ Select a candidate first."
+    candidate = next(
+        (r for r in _last_results if r["metadata"].get("email", "") == email_addr),
+        None,
+    )
+    if not candidate:
+        return "", "", "❌ Candidate not found in last results."
+    subject, body, status = send_personalized_email(candidate, job_context=job_ctx)
+    return subject, body, status
+
+# Wire it up (add this .click inside the "✉️ Send Emails" with-block):
+# ai_draft_btn.click(
+#     cb_ai_draft,
+#     inputs=[candidate_dd, gr.Textbox(value="")],  # pass job context if available
+#     outputs=[subject_box, body_box, ai_draft_status],
+# )
