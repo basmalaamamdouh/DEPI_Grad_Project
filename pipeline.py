@@ -480,6 +480,7 @@ def search(
     section_filter: str | None = None,
     use_reranker:   bool = True,
 ) -> list[dict]:
+    top_k = int(top_k)   # defensive cast — callers may pass strings
     col = get_collection()
     if col.count() == 0:
         return []
