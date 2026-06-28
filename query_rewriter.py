@@ -1,4 +1,3 @@
-
 """
 query_rewriter.py  —  Engineer 1 task
 LLM-based query intelligence layer for the HR RAG pipeline.
@@ -93,6 +92,20 @@ Rules:
 # MAIN FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _safe_int(val, default=None):
+    """
+    Convert val to int safely. Returns default if val is None, non-numeric string
+    (e.g. "mid", "senior"), or anything else that can't be cleanly cast.
+    """
+    if val is None:
+        return default
+    try:
+        result = int(val)
+        return result if result > 0 else default
+    except (ValueError, TypeError):
+        return default
+
+
 def rewrite_query(query: str) -> RewrittenQuery:
     """
     Call Groq to expand and structure the HR query.
@@ -138,7 +151,7 @@ def rewrite_query(query: str) -> RewrittenQuery:
             alternatives        = data.get("alternatives", [])[:2],
             must_have_skills    = data.get("must_have_skills", []),
             nice_to_have_skills = data.get("nice_to_have_skills", []),
-            min_years_exp       = data.get("min_years_exp"),
+            min_years_exp       = _safe_int(data.get("min_years_exp")),  # "mid"/"senior" → None
             seniority           = data.get("seniority"),
             location            = data.get("location"),
             rewritten           = True,
@@ -162,10 +175,13 @@ def apply_hard_filters(
     Remove candidates that fail hard constraints.
     All filters are lenient — if a field is missing we give the candidate benefit of the doubt.
     """
+    # Cast defensively — Gradio sliders and LangGraph state can pass strings
+    min_fit_pct = int(min_fit_pct)
+
     out = []
     for c in candidates:
-        # 1. Minimum fit percentage
-        if c.get("fit_pct", 0) < min_fit_pct:
+        # 1. Minimum fit percentage — cast fit_pct too in case ChromaDB returned a string
+        if int(c.get("fit_pct", 0)) < min_fit_pct:
             continue
 
         all_text = " ".join(c.get("all_chunks", [c.get("text", "")])).lower()
@@ -180,9 +196,10 @@ def apply_hard_filters(
                 continue  # skip candidate missing a required skill
 
         # 3. Minimum years of experience (only if explicitly stated in query)
-        if rq.min_years_exp and rq.min_years_exp > 0:
-            years = c.get("years_exp", 0)
-            if years and years < rq.min_years_exp:
+        min_yrs = _safe_int(rq.min_years_exp)
+        if min_yrs:
+            years = _safe_int(c.get("years_exp"), default=0)
+            if years and years < min_yrs:
                 continue  # skip under-experienced candidates
 
         out.append(c)
@@ -214,6 +231,10 @@ def smart_search(
     """
     from pipeline import search, embed_query
     from pipeline import _rrf, get_collection, load_bm25, get_reranker, _score_candidate
+
+    # Cast defensively — callers may pass strings from Gradio or LangGraph state
+    top_k       = int(top_k)
+    min_fit_pct = int(min_fit_pct)
 
     # Step 1: rewrite
     rq = rewrite_query(query)
@@ -368,5 +389,3 @@ def smart_search(
 #
 #   # Update both .click() and .submit() inputs:
 #   inputs=[query_box, section_dd, top_k_sl, rerank_cb, min_fit_sl],
-#
-

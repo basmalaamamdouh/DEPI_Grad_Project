@@ -20,6 +20,7 @@ Install:
 """
 
 import os
+import re
 from typing import TypedDict, Annotated, Literal
 import operator
 
@@ -88,28 +89,25 @@ def supervisor_node(state: HRState) -> HRState:
 
 def search_agent_node(state: HRState) -> HRState:
     """
-    Calls smart_search() to find matching candidates.
-    Also calls run_agent_turn() to get the LLM-generated HTML reply.
+    Calls smart_search() ONCE to find candidates.
+    Then calls run_agent_turn() with a cached-results adapter
+    so it does NOT search again — it reuses what we already found.
     """
     print(f"[Agent 1] Searching for: {state['user_query']}")
     errors = []
 
-    # ── Defensive int casting — Gradio sliders and LangGraph state can
-    #    serialize ints as strings; pipeline.py does > comparisons on these
     top_k       = int(state.get("top_k", 5))
     min_fit_pct = int(state.get("min_fit_pct", 10))
 
     try:
-        # Run the hybrid search pipeline
+        # ── Search ONCE ───────────────────────────────────────────────────────
         candidates, rq = smart_search(
-            query       = state["user_query"],
-            top_k       = top_k,
-            min_fit_pct = min_fit_pct,
-            use_reranker= True,
+            query        = state["user_query"],
+            top_k        = top_k,
+            min_fit_pct  = min_fit_pct,
+            use_reranker = True,
         )
 
-        # Normalize fit_pct on every candidate to int — ChromaDB metadata
-        # sometimes returns numeric fields as strings
         for c in candidates:
             c["fit_pct"]      = int(c.get("fit_pct", 0))
             c["years_exp"]    = int(c.get("years_exp", 0))
@@ -117,43 +115,41 @@ def search_agent_node(state: HRState) -> HRState:
 
         print(f"[Agent 1] Found {len(candidates)} candidates")
 
-        # Run the conversational agent (LLM summary + HTML cards)
-        def _search_adapter(query, top_k, min_fit_pct):
-            return smart_search(query, top_k=int(top_k), min_fit_pct=int(min_fit_pct))
+        # ── Pass cached results to run_agent_turn — no second search ──────────
+        # The adapter ignores the query and returns the already-found candidates.
+        _cached = (candidates, rq)
+
+        def _cached_adapter(query, top_k, min_fit_pct):
+            return _cached   # return what we already have, no new search
 
         search_html, llm_history = run_agent_turn(
             user_message = state["user_query"],
             llm_history  = state.get("llm_history", []),
-            search_fn    = _search_adapter,
+            search_fn    = _cached_adapter,
         )
 
     except Exception as e:
         print(f"[Agent 1] ERROR: {e}")
         errors.append(f"Agent1: {e}")
-        candidates   = []
-        search_html  = f"<div style='color:red'>Search failed: {e}</div>"
-        llm_history  = state.get("llm_history", [])
+        candidates  = []
+        search_html = f"<div style='color:red'>Search failed: {e}</div>"
+        llm_history = state.get("llm_history", [])
 
-    # Decide next node
     mode = state.get("mode", "search")
     if not candidates or mode == "search":
         next_agent = "end"
-    elif mode == "reason":
-        next_agent = "reason"
-    elif mode == "email":
-        next_agent = "reason"   # reason runs before email
-    elif mode == "full":
+    elif mode in ("reason", "email", "full"):
         next_agent = "reason"
     else:
         next_agent = "end"
 
     return {
         **state,
-        "candidates":   candidates,
-        "search_html":  search_html,
-        "llm_history":  llm_history,
-        "next_agent":   next_agent,
-        "errors":       errors,
+        "candidates":  candidates,
+        "search_html": search_html,
+        "llm_history": llm_history,
+        "next_agent":  next_agent,
+        "errors":      errors,
     }
 
 
@@ -164,17 +160,40 @@ def search_agent_node(state: HRState) -> HRState:
 
 def _find_named_candidate(message: str, candidates: list) -> list:
     """
-    If the message mentions a specific candidate's name, return only that candidate.
-    Otherwise return all candidates (for "why did you choose them all" style questions).
+    If the message mentions a specific candidate's name, return only that candidate(s).
+    Checks both the extracted contact name and the filename.
+    Returns all candidates if no name match found.
     """
     msg_lower = message.lower().strip()
+    matched = []
+
     for c in candidates:
-        name = (c.get("metadata", {}).get("name", "") or
-                c.get("metadata", {}).get("file", "")).lower()
-        name_parts = [p for p in name.replace("_", " ").replace(".", " ").split() if len(p) >= 4]
-        if any(part in msg_lower for part in name_parts):
-            return [c]   # ← only the named candidate
-    return candidates    # ← all candidates (generic "why them" question)
+        meta = c.get("metadata", {})
+
+        # Check 1: extracted contact name (e.g. "Basmala Mamdouh")
+        contact_name = (meta.get("name", "") or "").lower()
+
+        # Check 2: filename (e.g. "Basmala_Mamdouh_Resume.pdf")
+        file_name = (meta.get("file", "") or "").lower()
+
+        # Build name parts from both sources, min 4 chars to avoid false positives
+        all_name_parts = set()
+        for raw in [contact_name, file_name]:
+            parts = re.split(r"[\s_.\-]+", raw)
+            all_name_parts.update(p for p in parts if len(p) >= 4)
+
+        print(f"  [name_match] checking '{c['metadata'].get('file','')}' "
+              f"parts={all_name_parts} against msg='{msg_lower[:40]}'")
+
+        if any(part in msg_lower for part in all_name_parts):
+            matched.append(c)
+
+    if matched:
+        print(f"  [name_match] matched {len(matched)} candidate(s)")
+        return matched
+
+    print(f"  [name_match] no name match → returning all {len(candidates)} candidates")
+    return candidates
 
 
 def reasoning_agent_node(state: HRState) -> HRState:
@@ -731,13 +750,81 @@ def run_conversational_turn(
         return reply_html, updated_history, last_candidates  # candidates unchanged
 
     # ── Case 3: Brand-new search query ───────────────────────────────────────
-    print(f"[Orchestrator] New search query: {user_message[:60]}")
+    # ── Case 3: "more results" / pagination request ───────────────────────────
+    _MORE_TRIGGERS = [
+        "more", "4 more", "5 more", "show more", "i want more",
+        "give me more", "additional", "other candidates", "other people",
+        "next", "paginate", "more people", "more profiles", "more results",
+        "اكتر", "كمان", "زيادة", "غيرهم",
+    ]
+    msg_lower_check = user_message.lower().strip()
+    is_more_request = (
+        any(t in msg_lower_check for t in _MORE_TRIGGERS)
+        and last_candidates  # only if we already have results
+    )
+
+    if is_more_request:
+        # Extract how many more they want
+        import re as _re
+        num_match = _re.search(r"\b(\d+)\b", user_message)
+        more_k = int(num_match.group(1)) if num_match else top_k
+
+        # Get already-seen file names to exclude
+        seen_files = {c["metadata"].get("file", "") for c in (last_candidates or [])}
+
+        # Re-run search with higher top_k and filter out already-seen candidates
+        print(f"[Orchestrator] 'More' request → fetching {more_k} additional candidates")
+        from query_rewriter import smart_search
+        last_query = _last_query_from_history(llm_history) or user_message
+
+        new_candidates, rq = smart_search(
+            query       = last_query,
+            top_k       = len(seen_files) + more_k + 5,  # fetch extra to have room to filter
+            min_fit_pct = 10,
+            use_reranker= True,
+        )
+
+        # Filter out already-seen candidates
+        fresh = [c for c in new_candidates if c["metadata"].get("file", "") not in seen_files]
+        fresh = fresh[:more_k]
+
+        if not fresh:
+            reply_html = "<div class='empty-state'>No additional candidates found beyond those already shown.</div>"
+            updated_history = llm_history + [
+                {"role": "user",      "content": user_message},
+                {"role": "assistant", "content": "No additional candidates found."},
+            ]
+            return reply_html, updated_history, last_candidates
+
+        # Merge new results with existing ones for context
+        all_candidates = (last_candidates or []) + fresh
+
+        # Build HTML cards for only the new ones
+        from RetriveCVAgent import render_card
+        offset = len(last_candidates or [])
+        cards_html = "".join(render_card(offset + i + 1, c) for i, c in enumerate(fresh))
+        summary_div = (
+            f"<div style='line-height:1.75;font-family:system-ui,sans-serif;color:#1C1F1B;margin-bottom:10px'>"
+            f"Here are {len(fresh)} more candidates matching your requirements.</div>"
+        )
+        reply_html = summary_div + cards_html
+
+        updated_history = llm_history + [
+            {"role": "user",      "content": user_message},
+            {"role": "assistant", "content": f"Showing {len(fresh)} more candidates."},
+        ]
+        return reply_html, updated_history, all_candidates
+
+    # ── Case 4: Brand-new search query ───────────────────────────────────────
+    import uuid
+    fresh_thread_id = f"{thread_id}_{uuid.uuid4().hex[:8]}"
+    print(f"[Orchestrator] New search query (thread={fresh_thread_id}): {user_message[:60]}")
     result = run_pipeline(
         user_query   = user_message,
         mode         = "search",
         top_k        = top_k,
         min_fit_pct  = min_fit_pct,
-        thread_id    = thread_id,
+        thread_id    = fresh_thread_id,
         llm_history  = llm_history,
     )
     return result["search_html"], result["llm_history"], result["candidates"]

@@ -1,113 +1,119 @@
-<<<<<<< HEAD
-Anwar Mousa-Date.pdf
-CV Maryem Ahmed (3).pdf
-Completion Certificate _ SkillsBuild.pdf
-Course 2 ML.pdf
-Coursera 1YU8DI0GH2HU.pdf
-FLB-FL_Course Certificate En.pdf
-Maryem Ahmed CV.pdf
-Maryem Ahmed Certificate.pdf
-Maryem Ahmed Sobeih Abdelrahman.pdf
-Maryem Ahmed Subaih.pdf
-Maryem Ahmed's CV.pdf
-Maryem Ahmed's Certificate.pdf
-Maryem Ahmed's Resume  (1).pdf
-Maryem Ahmed's certificate_FE.pdf
-Maryem Ahmed-AI.pdf
-My Learning _ NVIDIA.pdf
-RIASEC (Occupations).pdf
-Supervised Learning.pdf
-Tcz8gTtprzAS4xSoK_SKZxezskWgmFjRvj9_KiWjcsnS4jpYdxKfx_1744675729730_completion_certificate.pdf
-Unsupervised Learning.pdf
-first de.pdf
-pandas DataCamp.pdf
-pytorch.pdf
-=======
-<<<<<<< HEAD
-Maryem Ahmed-AI.pdf
->>>>>>> 7cb96ab0242e7ec6d1ccb25630fe6e49f114bbab
-=======
-Maryem Ahmed-AI.pdf
->>>>>>> 7cb96ab0242e7ec6d1ccb25630fe6e49f114bbab
-Maryem Ahmed-AI.pdf
->>>>>>> ccd2dadd5377540db68e843a6ff95315064a1051
-Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
+0.pdf
+0287439839da10d2.pdf
+028cd00be9bb156d.pdf
+0452d98376727179.pdf
+0857decaec1c1f99.pdf
+0dc1822617b26a90.pdf
+0e00826ebf4625da.pdf
+0e30209bf7aa198a.pdf
+1.pdf
+10.pdf
+100.pdf
+101.pdf
+102.pdf
+103.pdf
+104.pdf
+105.pdf
+106.pdf
+107.pdf
+108.pdf
+109.pdf
+11.pdf
+110.pdf
+111.pdf
+112.pdf
+113.pdf
+114.pdf
+115.pdf
+116.pdf
+117.pdf
+117e83282455302b.pdf
+118.pdf
+119.pdf
+12.pdf
+120.pdf
+121.pdf
+122.pdf
+123.pdf
+124.pdf
+125.pdf
+126.pdf
+127.pdf
+128.pdf
+129.pdf
+13.pdf
+130.pdf
+131.pdf
+1315cc92aab2c895.pdf
+132.pdf
+133.pdf
+134.pdf
+135.pdf
+136.pdf
+137.pdf
+138.pdf
+139.pdf
+14.pdf
+140.pdf
+141.pdf
+142.pdf
+144.pdf
+145.pdf
+146.pdf
+147.pdf
+148.pdf
+149.pdf
+15.pdf
+150.pdf
+151.pdf
+152.pdf
+153.pdf
+154.pdf
+155.pdf
+156.pdf
+157.pdf
+158.pdf
+159.pdf
+159a611254b68066.pdf
+16.pdf
+160.pdf
+161.pdf
+162.pdf
+164.pdf
+165.pdf
+166.pdf
+167.pdf
+168.pdf
+169.pdf
+16c46f2968f31b16.pdf
+17.pdf
+170.pdf
+171.pdf
+172.pdf
+173.pdf
+174.pdf
+175.pdf
+176.pdf
+177.pdf
+178.pdf
+adam.pdf
 AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
-omniajawad(cv) (2).pdf
+Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
 Aya_Khaled_CV (2).pdf
+Basmala_Mamdouh_Resume .pdf
+Blue Minimalist Lecturer Resume.pdf
+Esther_Balogun.pdf
+Farah_Yehia_AI.pdf
+kerwin_jeong.pdf
+Lojain_Mohamed_CV.pdf
 Maryem Ahmed-AI.pdf
 Mohamed_Ibrahim_CV.pdf
-Basmala_Mamdouh_Resume .pdf
-Mohamed_Ibrahim_CV.pdf
-Basmala_Mamdouh_Resume .pdf
 Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
-AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
+NOAH_SCHUMACHER.pdf
+OLIVIA SANCHEZ.pdf
+OLIVIA_WILSON.pdf
 omniajawad(cv) (2).pdf
-Aya_Khaled_CV (2).pdf
-Maryem Ahmed-AI.pdf
-Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
-AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
-omniajawad(cv) (2).pdf
-Aya_Khaled_CV (2).pdf
-Maryem Ahmed-AI.pdf
-Mohamed_Ibrahim_CV.pdf
-Basmala_Mamdouh_Resume .pdf
-Mohamed_Ibrahim_CV.pdf
-Basmala_Mamdouh_Resume .pdf
-Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
-AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
-omniajawad(cv) (2).pdf
-Aya_Khaled_CV (2).pdf
-Maryem Ahmed-AI.pdf
-Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
-AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
-omniajawad(cv) (2).pdf
-Aya_Khaled_CV (2).pdf
-Maryem Ahmed-AI.pdf
-Mohamed_Ibrahim_CV.pdf
-Basmala_Mamdouh_Resume .pdf
-Mohamed_Ibrahim_CV.pdf
-Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
-AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
-omniajawad(cv) (2).pdf
-Aya_Khaled_CV (2).pdf
-Maryem Ahmed-AI.pdf
-Basmala_Mamdouh_Resume .pdf
-Mohamed_Ibrahim_CV.pdf
-Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
-AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
-omniajawad(cv) (2).pdf
-Aya_Khaled_CV (2).pdf
-Maryem Ahmed-AI.pdf
-Basmala_Mamdouh_Resume .pdf
-Mohamed_Ibrahim_CV.pdf
-Basmala_Mamdouh_Resume .pdf
-Mostafa _cv.pdf
-Ahmed_Abdelhamed_Amin_CV_Final_Exact.pdf
-AG Cv.pdf
-Lojain_Mohamed_CV.pdf
-Farah_Yehia_AI.pdf
-omniajawad(cv) (2).pdf
-Aya_Khaled_CV (2).pdf
-Maryem Ahmed-AI.pdf
+RICARDO_SALINAS.pdf
+Samuel_Stroms.pdf
+saul_delimas.pdf
+SEBASTIAN_BENNETT.pdf

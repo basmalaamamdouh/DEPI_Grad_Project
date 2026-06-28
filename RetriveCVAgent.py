@@ -155,8 +155,14 @@ def render_card(rank: int, result: dict) -> str:
     phone   = m.get("phone", "")
     linkedin= m.get("linkedin", "")
     file_nm = m.get("file", "—")
-    quality = result.get("match_quality", "partial")
     pct     = result.get("fit_pct", 0)
+    # Derive quality from fit_pct directly so badge always matches the score
+    if pct >= 70:
+        quality = "strong"
+    elif pct >= 45:
+        quality = "good"
+    else:
+        quality = "partial"
     years   = result.get("years_exp", 0)
     hits    = result.get("keyword_hits", 0)
     secs    = list(dict.fromkeys(result.get("sections_found", [])))[:5]
@@ -170,7 +176,7 @@ def render_card(rank: int, result: dict) -> str:
     li_html    = (f'<a href="https://{linkedin}" target="_blank"'
                   f' style="color:#2F6F4E;text-decoration:none">LinkedIn ↗</a>') if linkedin else "—"
 
-    badges = (_chip(f"{years}y exp", filled=True) if years else "") + \
+    badges = (_chip(f"{years}y exp", filled=True) if years is not None else "") + \
              (_chip(f"{hits} kw hits", filled=True) if hits else "")
     chips  = "".join(_chip(s) for s in secs if s)
 
@@ -383,9 +389,22 @@ def run_agent_turn(
         reply_html = summary_div + no_results
 
     # Update history with TEXT-ONLY versions (no HTML — Groq doesn't need it)
+    # Include candidate details so follow-up questions ("why did you choose X") work
+    if results:
+        candidate_context = "\n".join(
+            f"- {r['metadata'].get('name', Path(r['metadata'].get('file','?')).stem)}: "
+            f"{r.get('fit_pct', 0)}% fit, {r.get('match_quality','partial')} match, "
+            f"sections: {', '.join(r.get('sections_found', []))}, "
+            f"keywords hit: {r.get('keyword_hits', 0)}, "
+            f"preview: {(r.get('text') or r.get('all_chunks', [''])[0])[:200].replace(chr(10),' ')}"
+            for r in results
+        )
+        assistant_memory = f"{summary}\n\nCandidates returned:\n{candidate_context}"
+    else:
+        assistant_memory = summary
+
     updated = llm_history + [
         {"role": "user",      "content": user_message},
-        {"role": "assistant", "content": summary},
+        {"role": "assistant", "content": assistant_memory},
     ]
     return reply_html, updated
-
