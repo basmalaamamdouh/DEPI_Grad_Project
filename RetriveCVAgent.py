@@ -328,11 +328,16 @@ def run_agent_turn(
     results, _rq = search_fn(query=query, top_k=top_k, min_fit_pct=min_fit)
 
     # Compact text summary for Groq turn 2 (not HTML)
+    # In RetriveCVAgent.py, update the candidate_context building:
     if results:
-        names_scores = ", ".join(
-            f"{r['metadata'].get('name', Path(r['metadata'].get('file','?')).stem)}"
-            f" ({r.get('fit_pct', 0)}%)"
-            for r in results
+        candidate_context = "\n".join(
+        f"- {r['metadata'].get('name', Path(r['metadata'].get('file','?')).stem)}: "
+        f"{r.get('fit_pct', 0)}% fit, "
+        f"email: {r['metadata'].get('email', 'N/A')}, "  # ← Add this line
+        f"phone: {r['metadata'].get('phone', 'N/A')}, "   # ← And this
+        f"sections: {', '.join(r.get('sections_found', []))}, "
+        f"keywords hit: {r.get('keyword_hits', 0)}"
+        for r in results
         )
         tool_result = f"Found {len(results)} candidates: {names_scores}."
     else:

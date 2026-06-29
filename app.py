@@ -8,7 +8,8 @@ import os, math, smtplib
 from pathlib import Path
 from email.mime.text      import MIMEText
 from email.mime.multipart import MIMEMultipart
-
+from EmailSenderAgent import generate_and_send_email, format_email_preview
+from orchestrator import run_conversational_turn  # Already imported
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import gradio as gr
