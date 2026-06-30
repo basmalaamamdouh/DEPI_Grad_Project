@@ -339,7 +339,7 @@ def run_agent_turn(
         f"keywords hit: {r.get('keyword_hits', 0)}"
         for r in results
         )
-        tool_result = f"Found {len(results)} candidates: {names_scores}."
+        tool_result = f"Found {len(results)} candidates:\n{candidate_context}"
     else:
         tool_result = "No candidates found matching those criteria."
 

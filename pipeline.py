@@ -39,7 +39,8 @@ BM25_REBUILD_EVERY = 20    # rebuild BM25 every N new files (not every file)
 # Raw rerank scores from ms-marco-MiniLM are in roughly (-10, +10).
 # We map them to 0-100% with a sigmoid so the UI always shows a meaningful number.
 SCORE_SCALE     = 0.35     # sigmoid steepness — increase to spread scores out more
-SCORE_SHIFT     = 2.0      # centre of the sigmoid — shift right = stricter 50% threshold
+SCORE_SHIFT     = 0.5      # centre of the sigmoid — lowered from 2.0 so entry-level
+                           # CVs (CrossEncoder score ~1-3) reach a fair 50%+ baseline
 
 for d in (CHROMA_DIR, UPLOAD_DIR):
     Path(d).mkdir(exist_ok=True)
@@ -102,8 +103,121 @@ def get_reranker():
     return _reranker
 
 def _sigmoid_pct(raw_score: float) -> int:
-    """Map a raw reranker score → 0-100 integer percentage."""
+    """
+    Map a raw CrossEncoder score → 0-100 integer percentage.
+
+    ms-marco-MiniLM-L-6-v2 scores fresh-grad / short CVs in roughly the 0-4
+    range even when they are clearly relevant. The original SCORE_SHIFT=2.0
+    mapped a score of 2 → 50%, which unfairly penalised those candidates.
+
+    New default (SCORE_SHIFT=0.5) centres the sigmoid so a score of ~1.5
+    already reaches 50%, giving entry-level candidates a fairer baseline.
+    Adjust SCORE_SHIFT in the CONFIG block at the top of this file if needed.
+    """
     return round(100 / (1 + math.exp(-SCORE_SCALE * (raw_score - SCORE_SHIFT))))
+
+
+# ── Skill concept groups for query-aware scoring ──────────────────────────────
+# Each entry is (query_triggers, cv_evidence).
+#   query_triggers : if ANY of these appear in the query → this skill is "requested"
+#   cv_evidence    : if ANY of these appear in the CV text → the skill is "present"
+#
+# Using concept groups instead of word-splitting avoids double-counting
+# ("machine learning deep learning" → 2 concepts, not 4 word hits) and
+# correctly handles multi-word phrases and abbreviations.
+
+_SKILL_GROUPS: list[tuple[list[str], list[str]]] = [
+    # ── LLMs / Generative AI ──────────────────────────────────────────────────
+    (
+        ["large language model", "llm", "llms", "generative ai", "genai", "gpt", "chatgpt"],
+        ["llm", "llms", "gpt", "chatgpt", "large language model", "generative ai", "genai",
+         "foundation model", "gemini", "claude", "mistral", "llama"],
+    ),
+    # ── Machine Learning ──────────────────────────────────────────────────────
+    (
+        ["machine learning", " ml ", "sklearn", "scikit"],
+        ["machine learning", " ml ", "sklearn", "scikit", "xgboost", "random forest",
+         "gradient boosting", "supervised learning", "unsupervised learning",
+         "classification", "regression", "clustering"],
+    ),
+    # ── Deep Learning ─────────────────────────────────────────────────────────
+    (
+        ["deep learning", " dl ", "neural network", "cnn", "rnn", "lstm", "transformer"],
+        ["deep learning", " dl ", "neural network", "cnn", "rnn", "lstm", "transformer",
+         "pytorch", "tensorflow", "keras", "backpropagation", "convolutional"],
+    ),
+    # ── NLP ───────────────────────────────────────────────────────────────────
+    (
+        ["natural language processing", "nlp", "bert", "text classification", "sentiment"],
+        ["nlp", "natural language processing", "bert", "roberta", "transformers", "spacy",
+         "nltk", "huggingface", "hugging face", "text classification", "sentiment",
+         "named entity", "ner", "token"],
+    ),
+    # ── Computer Vision ───────────────────────────────────────────────────────
+    (
+        ["computer vision", "image recognition", "object detection", "opencv", "yolo"],
+        ["computer vision", "opencv", "yolo", "resnet", "vgg", "image recognition",
+         "object detection", "image classification", "image segmentation", "mediapipe"],
+    ),
+    # ── RAG / Vector Search ───────────────────────────────────────────────────
+    (
+        ["rag", "retrieval augmented", "vector search", "semantic search", "chromadb",
+         "faiss", "embedding"],
+        ["rag", "retrieval augmented", "retrieval-augmented", "vector search", "chromadb",
+         "faiss", "pinecone", "weaviate", "qdrant", "semantic search", "embedding search"],
+    ),
+    # ── Agentic / LangChain ───────────────────────────────────────────────────
+    (
+        ["agent", "agentic", "langchain", "langgraph", "multi-agent", "tool use"],
+        ["agent", "agentic", "langchain", "langgraph", "autogen", "crewai",
+         "multi-agent", "react agent", "tool use", "function calling"],
+    ),
+    # ── Python ────────────────────────────────────────────────────────────────
+    (
+        ["python"],
+        ["python", "pytorch", "tensorflow", "pandas", "numpy", "scipy",
+         "fastapi", "flask", "django", ".py"],
+    ),
+    # ── Cloud / MLOps ─────────────────────────────────────────────────────────
+    (
+        ["mlops", "docker", "kubernetes", "cloud", "aws", "gcp", "azure", "deployment"],
+        ["mlops", "docker", "kubernetes", "aws", "gcp", "azure", "sagemaker",
+         "vertex ai", "model deployment", "model serving", "airflow", "mlflow"],
+    ),
+    # ── Data Science / Analytics ──────────────────────────────────────────────
+    (
+        ["data science", "data analysis", "data scientist", "analytics"],
+        ["data science", "data analysis", "pandas", "numpy", "power bi", "tableau",
+         "matplotlib", "seaborn", "sql", "statistics", "eda"],
+    ),
+    # ── Software Engineering fundamentals ─────────────────────────────────────
+    (
+        ["api", "fastapi", "rest", "backend", "software engineer"],
+        ["api", "fastapi", "rest", "flask", "django", "backend", "microservice",
+         "docker", "git", "software engineer"],
+    ),
+]
+
+
+def _concept_skill_coverage(query: str, cv_text: str) -> tuple[int, int]:
+    """
+    Returns (hits, total_requested) where:
+    - total_requested = number of _SKILL_GROUPS triggered by the query
+    - hits            = how many of those requested skills appear in the CV text
+
+    Both query and cv_text must already be lowercased.
+    """
+    hits = 0
+    total = 0
+    for triggers, evidence in _SKILL_GROUPS:
+        query_mentions = any(t in query for t in triggers)
+        if not query_mentions:
+            continue
+        total += 1
+        cv_has = any(e in cv_text for e in evidence)
+        if cv_has:
+            hits += 1
+    return hits, max(total, 1)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TEXT EXTRACTION  — native first, OCR only as fallback
@@ -438,38 +552,68 @@ def _extract_years(text: str) -> int:
     return max((int(m) for m in matches), default=0)
 
 def _score_candidate(candidate: dict, query: str) -> dict:
-    all_text    = " ".join(candidate["all_chunks"]).lower()
-    query_words = [w.lower() for w in query.split() if len(w) > 2]
+    """
+    Compute a blended fit_pct from three signals:
 
+      60% — CrossEncoder rerank_score (semantic relevance)
+      30% — Concept-level skill coverage: how many AI/ML skills mentioned in
+             the query are also found in the CV, using _SKILL_GROUPS for
+             phrase-aware matching (avoids double-counting 'learning' in
+             'machine learning deep learning').
+      10% — CV section richness (breadth of CV sections covered)
+
+    When rerank_score is absent, blend shifts to 70% skill coverage + 30%
+    section richness.
+    """
+    query_lower = query.lower()
+    all_text    = " ".join(candidate["all_chunks"]).lower()
+    years       = _extract_years(all_text)
+
+    # ── Signal 1: concept-level skill coverage ────────────────────────────────
+    skill_hits, skill_total = _concept_skill_coverage(query_lower, all_text)
+    skill_coverage = skill_hits / skill_total   # 0.0 – 1.0
+
+    # keyword_hits: kept for UI display (the green chip showing "N kw hits")
+    # Still uses simple word split — only used for the chip, not for fit_pct
+    query_words  = [w for w in query_lower.split() if len(w) > 2]
     keyword_hits = sum(1 for w in query_words if w in all_text)
-    hit_ratio    = keyword_hits / max(len(query_words), 1)
-    years        = _extract_years(all_text)
+
+    # ── Signal 2: CV section richness (0-1) ──────────────────────────────────
+    unique_sections  = set(s for s in candidate.get("sections_found", []) if s)
+    section_richness = len(unique_sections) / max(len(SECTION_KEYWORDS), 1)
 
     sections_matched = list(dict.fromkeys(candidate.get("sections_found", [])))
 
-    # Fit percentage — prefer rerank_score if available, else derive from hit_ratio
+    # ── Blended fit_pct ───────────────────────────────────────────────────────
     if "rerank_score" in candidate:
-        fit_pct = _sigmoid_pct(candidate["rerank_score"])
+        rerank_pct = _sigmoid_pct(candidate["rerank_score"])
+        fit_pct = round(
+            0.60 * rerank_pct
+            + 0.30 * skill_coverage   * 100
+            + 0.10 * section_richness * 100
+        )
     else:
-        fit_pct = round(hit_ratio * 100)
+        fit_pct = round(
+            0.70 * skill_coverage   * 100
+            + 0.30 * section_richness * 100
+        )
 
-    # Clamp: a partial hit_ratio=0 candidate should still show at least 1%
     fit_pct = max(1, min(99, fit_pct))
 
-    score = candidate.get("rerank_score", candidate["rrf_score"])
-    if fit_pct >= 70 or hit_ratio >= 0.7:
+    # ── Match quality badge ───────────────────────────────────────────────────
+    if fit_pct >= 65 or skill_coverage >= 0.7:
         quality = "strong"
-    elif fit_pct >= 45 or hit_ratio >= 0.4:
+    elif fit_pct >= 40 or skill_coverage >= 0.4:
         quality = "good"
     else:
         quality = "partial"
 
     candidate.update({
-        "keyword_hits":    keyword_hits,
-        "years_exp":       years,
-        "match_quality":   quality,
-        "hit_ratio":       round(hit_ratio, 2),
-        "fit_pct":         fit_pct,
+        "keyword_hits":     keyword_hits,
+        "years_exp":        years,
+        "match_quality":    quality,
+        "hit_ratio":        round(skill_coverage, 2),
+        "fit_pct":          fit_pct,
         "sections_matched": sections_matched,
     })
     return candidate

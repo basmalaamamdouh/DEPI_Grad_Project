@@ -130,6 +130,9 @@ def rewrite_query(query: str) -> RewrittenQuery:
             model=REWRITE_MODEL,
             max_tokens=400,
             timeout=REWRITE_TIMEOUT,
+            temperature=0,  # deterministic — same query must always expand the same way,
+                            # otherwise downstream embedding search returns different
+                            # candidates/order on every identical run
             messages=[
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user",   "content": query},
@@ -163,7 +166,131 @@ def rewrite_query(query: str) -> RewrittenQuery:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HARD FILTER  (applied after reranking, before returning results to UI)
+# SYNONYM MAP  —  covers common AI/ML/tech abbreviations and alternate spellings
+# Add more rows here as needed; all values are checked as substrings.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SYNONYMS: dict[str, list[str]] = {
+    # LLMs / GenAI
+    "large language model":   ["large language model", "llm", "llms", "gpt", "chatgpt",
+                                "generative ai", "genai", "gen ai", "foundation model"],
+    "llm":                    ["llm", "llms", "large language model", "gpt", "generative ai"],
+    "llms":                   ["llm", "llms", "large language model", "gpt", "generative ai"],
+    "generative ai":          ["generative ai", "genai", "gen ai", "llm", "llms", "gpt",
+                                "large language model", "foundation model"],
+    "prompt engineering":     ["prompt engineering", "prompt design", "prompting"],
+
+    # Classic ML
+    "machine learning":       ["machine learning", "ml", "sklearn", "scikit-learn",
+                                "supervised learning", "unsupervised learning",
+                                "gradient boosting", "xgboost", "random forest"],
+    "ml":                     ["ml", "machine learning", "sklearn", "scikit"],
+    "deep learning":          ["deep learning", "dl", "neural network", "neural net",
+                                "cnn", "rnn", "lstm", "transformer", "pytorch", "tensorflow",
+                                "keras", "backpropagation"],
+    "dl":                     ["dl", "deep learning", "neural network", "pytorch", "tensorflow"],
+    "neural network":         ["neural network", "neural net", "deep learning", "dl",
+                                "cnn", "rnn", "lstm", "transformer"],
+
+    # Computer Vision
+    "computer vision":        ["computer vision", "cv", "image recognition", "object detection",
+                                "image classification", "opencv", "yolo", "resnet", "vgg",
+                                "image segmentation", "mediapipe", "convolutional"],
+    "cv":                     ["computer vision", "cv", "opencv", "image recognition",
+                                "object detection", "yolo"],
+    "object detection":       ["object detection", "yolo", "rcnn", "faster rcnn",
+                                "ssd", "detection model"],
+    "image recognition":      ["image recognition", "image classification", "resnet", "vgg",
+                                "inception", "efficientnet", "computer vision"],
+
+    # NLP
+    "natural language processing": ["natural language processing", "nlp", "text classification",
+                                     "sentiment analysis", "named entity recognition", "ner",
+                                     "bert", "roberta", "transformers", "spacy", "nltk",
+                                     "huggingface", "hugging face"],
+    "nlp":                    ["nlp", "natural language processing", "bert", "transformers",
+                                "spacy", "nltk", "text classification", "huggingface"],
+
+    # RAG / agents
+    "rag":                    ["rag", "retrieval augmented generation",
+                                "retrieval-augmented generation", "vector search",
+                                "chromadb", "faiss", "pinecone", "weaviate",
+                                "semantic search", "embedding search"],
+    "retrieval augmented generation": ["retrieval augmented generation", "rag",
+                                        "retrieval-augmented generation", "vector search"],
+    "agentic":                ["agentic", "agent", "agents", "multi-agent", "langgraph",
+                                "langchain", "autogen", "crewai", "tool use", "react agent"],
+    "langchain":              ["langchain", "lang chain", "langgraph"],
+
+    # Frameworks / libraries
+    "pytorch":                ["pytorch", "torch"],
+    "tensorflow":             ["tensorflow", "tf", "keras"],
+    "huggingface":            ["huggingface", "hugging face", "hf", "transformers library"],
+    "opencv":                 ["opencv", "cv2", "open cv"],
+    "scikit-learn":           ["scikit-learn", "sklearn", "scikit"],
+    "fastapi":                ["fastapi", "fast api"],
+
+    # Python ecosystem
+    "python":                 ["python", "py", ".py", "django", "flask", "fastapi",
+                                "pandas", "numpy", "scipy"],
+    "pandas":                 ["pandas", "dataframe", "data wrangling"],
+    "numpy":                  ["numpy", "np", "ndarray"],
+
+    # Cloud / MLOps
+    "mlops":                  ["mlops", "ml ops", "model deployment", "model serving",
+                                "docker", "kubernetes", "k8s", "ci/cd", "mlflow",
+                                "airflow", "model monitoring"],
+    "docker":                 ["docker", "container", "containerization", "dockerfile"],
+    "kubernetes":             ["kubernetes", "k8s", "kubectl", "helm"],
+    "aws":                    ["aws", "amazon web services", "s3", "ec2", "sagemaker",
+                                "lambda", "amazon"],
+    "gcp":                    ["gcp", "google cloud", "bigquery", "vertex ai",
+                                "google cloud platform"],
+    "azure":                  ["azure", "microsoft azure", "azure ml"],
+
+    # Databases / vector stores
+    "sql":                    ["sql", "mysql", "postgresql", "postgres", "sqlite",
+                                "database", "relational database"],
+    "vector database":        ["vector database", "vector store", "chromadb", "faiss",
+                                "pinecone", "weaviate", "qdrant", "milvus"],
+
+    # Soft / role terms
+    "ai engineer":            ["ai engineer", "artificial intelligence engineer",
+                                "machine learning engineer", "ml engineer",
+                                "deep learning engineer", "data scientist"],
+    "data scientist":         ["data scientist", "data science", "ml engineer",
+                                "machine learning engineer", "ai engineer"],
+}
+
+
+def _skill_present(skill: str, text: str) -> bool:
+    """
+    Return True if `skill` (or any of its synonyms) appears in `text`.
+    Text must already be lowercased.
+    """
+    skill_lower = skill.lower().strip()
+
+    # Direct substring match first (fast path)
+    if skill_lower in text:
+        return True
+
+    # Check synonym list — both directions
+    synonyms = _SYNONYMS.get(skill_lower, [])
+    if any(syn in text for syn in synonyms):
+        return True
+
+    # Also check if this skill is a VALUE in the map (reverse lookup)
+    for key, vals in _SYNONYMS.items():
+        if skill_lower in vals:
+            # Check the key itself and all other synonyms
+            if key in text or any(v in text for v in vals):
+                return True
+
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SOFT FILTER  (replaced old hard filter — penalises instead of eliminates)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def apply_hard_filters(
@@ -172,37 +299,72 @@ def apply_hard_filters(
     min_fit_pct: int = MIN_FIT_DEFAULT,
 ) -> list[dict]:
     """
-    Remove candidates that fail hard constraints.
-    All filters are lenient — if a field is missing we give the candidate benefit of the doubt.
+    Applies skill checks with synonym expansion and soft scoring.
+
+    Changes from the old version:
+    - Skills are checked using a synonym map, so "DL" matches "deep learning",
+      "LLM" matches "large language model", etc.
+    - Missing must-have skills REDUCE fit_pct by a penalty instead of
+      eliminating the candidate outright. Only candidates missing ALL
+      must-have skills are dropped.
+    - The min_fit_pct threshold is the only hard cutoff — and it is applied
+      AFTER the penalty so the threshold remains meaningful.
+    - Years-of-experience filter is unchanged (only fires if explicitly stated
+      in query AND the candidate's CV has a parseable years field).
     """
-    # Cast defensively — Gradio sliders and LangGraph state can pass strings
     min_fit_pct = int(min_fit_pct)
+
+    # Per-missing-skill penalty: spread evenly so losing half the skills
+    # drops fit_pct by ~20 points. Adjust this constant to taste.
+    PENALTY_PER_MISSING_SKILL = 12
 
     out = []
     for c in candidates:
-        # 1. Minimum fit percentage — cast fit_pct too in case ChromaDB returned a string
-        if int(c.get("fit_pct", 0)) < min_fit_pct:
-            continue
-
+        fit = int(c.get("fit_pct", 0))
         all_text = " ".join(c.get("all_chunks", [c.get("text", "")])).lower()
 
-        # 2. Must-have skills — ALL must appear somewhere in the CV text
+        # ── Skill check with synonym expansion ───────────────────────────────
         if rq.must_have_skills:
-            missing = [
-                s for s in rq.must_have_skills
-                if s.lower() not in all_text
-            ]
-            if missing:
-                continue  # skip candidate missing a required skill
+            found   = [s for s in rq.must_have_skills if _skill_present(s, all_text)]
+            missing = [s for s in rq.must_have_skills if s not in found]
 
-        # 3. Minimum years of experience (only if explicitly stated in query)
+            print(
+                f"  [filter] {c['metadata'].get('file', '?')[:35]:<35} "
+                f"skills found={found} missing={missing}"
+            )
+
+            # Drop only if ZERO must-have skills are found at all
+            if not found and rq.must_have_skills:
+                print(f"  [filter] ✗ dropped — no must-have skills found")
+                continue
+
+            # Soft penalty for partial matches
+            penalty = len(missing) * PENALTY_PER_MISSING_SKILL
+            fit     = max(0, fit - penalty)
+            c       = {**c, "fit_pct": fit}   # don't mutate original dict
+
+        # ── Years-of-experience (unchanged — only fires if query states it) ──
         min_yrs = _safe_int(rq.min_years_exp)
         if min_yrs:
             years = _safe_int(c.get("years_exp"), default=0)
             if years and years < min_yrs:
-                continue  # skip under-experienced candidates
+                print(
+                    f"  [filter] ✗ dropped {c['metadata'].get('file','?')} "
+                    f"— exp {years}y < required {min_yrs}y"
+                )
+                continue
+
+        # ── Final fit threshold (after skill penalty applied) ─────────────────
+        if fit < min_fit_pct:
+            print(
+                f"  [filter] ✗ below threshold  {c['metadata'].get('file','?')} "
+                f"fit={fit}% < {min_fit_pct}%"
+            )
+            continue
 
         out.append(c)
+
+    print(f"  [filter] {len(out)} candidate(s) passed after soft filtering")
     return out
 
 
@@ -279,7 +441,11 @@ def smart_search(
                     existing["rrf_score"] = candidate["rrf_score"]
                     existing["text"] = "\n\n".join(existing["all_chunks"])
 
-    candidates = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)
+    candidates = sorted(
+        merged.values(),
+        key=lambda x: (x["rrf_score"], x["metadata"].get("file", "")),
+        reverse=True,
+    )
 
     # Step 4: rerank once over the merged pool (use primary query for reranking)
     if use_reranker and candidates:
